@@ -1,0 +1,10 @@
+{
+    "$schema": "../gen/schemas/desktop-schema.json",
+    "identifier": "default",
+    "description": "Qwen Studio 主窗口能力",
+    "windows": ["main"],
+    "permissions": [
+        "core:default",
+        "dialog:default"
+    ]
+}

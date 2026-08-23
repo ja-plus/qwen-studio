@@ -1,0 +1,39 @@
+{
+    "$schema": "https://schema.tauri.app/config/2",
+    "productName": "Qwen Studio",
+    "version": "0.1.0",
+    "identifier": "com.qwen.studio",
+    "build": {
+        "beforeDevCommand": "pnpm dev",
+        "devUrl": "http://localhost:4000",
+        "beforeBuildCommand": "pnpm build",
+        "frontendDist": "../dist"
+    },
+    "app": {
+        "windows": [
+            {
+                "title": "Qwen Studio - DashScope 多模型 Agent",
+                "width": 1280,
+                "height": 840,
+                "minWidth": 940,
+                "minHeight": 620,
+                "center": true
+            }
+        ],
+        "security": {
+            "csp": null
+        }
+    },
+    "bundle": {
+        "active": true,
+        "targets": ["nsis"],
+        "resources": ["../tools/agent-tools.mjs"],
+        "icon": [
+            "icons/32x32.png",
+            "icons/128x128.png",
+            "icons/128x128@2x.png",
+            "icons/icon.ico",
+            "icons/icon.png"
+        ]
+    }
+}
