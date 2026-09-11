@@ -1,11 +1,13 @@
 // tauri CLI 包装：Windows 下自动注入 MSVC + Windows SDK（xwin）构建环境后再调用 tauri，
 // Linux/macOS 直接透传；使 `npm run tauri dev/build` 在任意终端直接可用
-import { spawn, spawnSync } from 'node:child_process';
+import { spawn, spawnSync, exec } from 'node:child_process';
 import { existsSync, readdirSync } from 'node:fs';
 import { delimiter, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import net from 'node:net';
 
 const root = join(fileURLToPath(new URL('.', import.meta.url)), '..');
+const DEV_PORT = Number(process.env.QS_DEV_PORT || 4000); // 与 tauri.conf.json 的 devUrl 同源
 const XWIN = 'C:\\Users\\ja\\xwin';
 const SDK_TOOLS = 'C:\\Users\\ja\\sdk-tools';
 const VSWHERE = 'C:\\Program Files (x86)\\Microsoft Visual Studio\\Installer\\vswhere.exe';
@@ -61,5 +63,38 @@ if (process.platform === 'win32') {
 
 const bin = join(root, 'node_modules', '.bin', process.platform === 'win32' ? 'tauri.cmd' : 'tauri');
 const args = process.argv.slice(2);
+
+// ---------- dev 前的端口体检（只提示，不动任何进程） ----------
+
+function portBusy(port) {
+    return new Promise(resolve => {
+        const probe = net.createServer();
+        probe.once('error', err => resolve(err.code === 'EADDRINUSE' || err.code === 'EACCES'));
+        probe.once('listening', () => probe.close(() => resolve(false)));
+        probe.listen(port);
+    });
+}
+
+/** 尽量问出占用者（探测命令失败就给空串，不影响启动） */
+function portHolder(port) {
+    const cmd = process.platform === 'win32'
+        ? `netstat -ano | findstr LISTENING | findstr :${port}`
+        : `ss -ltnp "sport = :${port}"`;
+    return new Promise(resolve => {
+        exec(cmd, { timeout: 2500, encoding: 'utf8' }, (e, so) => {
+            resolve(e ? '' : so.trim().split('\n').slice(1).join('\n'));
+        });
+    });
+}
+
+if (args[0] === 'dev' && await portBusy(DEV_PORT)) {
+    const holder = await portHolder(DEV_PORT);
+    console.warn(`[tauri.mjs] 端口 ${DEV_PORT} 已被占用：beforeDevCommand(pnpm dev) 会因 EADDRINUSE 退出，`
+        + `而 tauri 只会笼统报“beforeDevCommand terminated”，真因容易看漏。`);
+    if (holder) console.warn(`[tauri.mjs] 占用者：\n${holder}`);
+    console.warn(`[tauri.mjs] 自行确认后再处理（本脚本不会主动杀进程）：`
+        + ` ${process.platform === 'win32' ? `netstat -ano | findstr :${DEV_PORT}` : `ss -ltnp | grep ':${DEV_PORT}'`} 然后 kill <pid>`);
+}
+
 const child = spawn(`"${bin}" ${args.map(a => `"${a}"`).join(' ')}`, { stdio: 'inherit', shell: true, env });
 child.on('close', code => process.exit(code ?? 1));
