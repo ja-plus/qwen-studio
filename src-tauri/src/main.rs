@@ -459,7 +459,8 @@ fn find_node_candidates() -> Vec<String> {
 /// 已验证可用的 node 路径缓存（避免每次调用都重试坏候选）
 static NODE_OK: Lazy<Mutex<Option<String>>> = Lazy::new(|| Mutex::new(None));
 
-// Windows 下隐藏 where 子进程的控制台窗口
+// Windows 下隐藏 where 子进程的控制台窗口（仅 Windows 使用）
+#[cfg(windows)]
 trait Flags {
     fn creation_flags_guard(&mut self) -> &mut Self;
 }
@@ -468,12 +469,6 @@ impl Flags for std::process::Command {
     fn creation_flags_guard(&mut self) -> &mut Self {
         use std::os::windows::process::CommandExt;
         self.creation_flags(0x0800_0000);
-        self
-    }
-}
-#[cfg(not(windows))]
-impl Flags for std::process::Command {
-    fn creation_flags_guard(&mut self) -> &mut Self {
         self
     }
 }
@@ -596,9 +591,74 @@ fn spawn_and_exchange(
         .map_err(|e| format!("Node 工具响应解析失败：{e}：{}", truncate_str(first, 200)))
 }
 
+/// Linux 分数缩放补偿（仅 X11）：GTK 只支持整数缩放，Deepin/UOS 等桌面用 Xft.dpi
+/// （如 144 = 150%）表达分数缩放，Tauri 拿到的 scale factor 仍是 1，窗口按逻辑像素
+/// 1:1 渲染、明显小于系统其他应用。这里仅把初始窗口尺寸放大同样倍数，网页内容
+/// 保持 1:1 渲染不做等比缩放，使窗口在屏幕上占用的比例与 Windows 高 DPI 下一致。
+#[cfg(target_os = "linux")]
+fn compensate_fractional_scale(win: &tauri::WebviewWindow) {
+    // GTK 已按整数 factor 缩放时（Wayland，或设置了 GDK_SCALE/整数缩放的 XSETTINGS）无需补偿
+    if win.scale_factor().unwrap_or(1.0) > 1.0 {
+        return;
+    }
+    let scale = x11_xft_scale();
+    if scale <= 1.0 {
+        return;
+    }
+    // inner_size 此刻等于配置的逻辑尺寸（scale=1 时物理即逻辑），按倍数放大
+    let size = match win.inner_size() {
+        Ok(s) => s,
+        Err(_) => return,
+    };
+    let (w, h) = (size.width as f64 * scale, size.height as f64 * scale);
+    let _ = win.set_size(tauri::PhysicalSize::new(w, h));
+    // 居中：放大的窗口需按显示器物理坐标重新计算位置（GTK 的窗口居中对已显示窗口不生效）
+    if let Ok(Some(monitor)) = win.current_monitor() {
+        let msize = monitor.size();
+        let mpos = monitor.position();
+        let x = mpos.x + ((msize.width as f64 - w) / 2.0).round() as i32;
+        let y = mpos.y + ((msize.height as f64 - h) / 2.0).round() as i32;
+        let _ = win.set_position(tauri::PhysicalPosition::new(x, y));
+    }
+}
+
+/// 读取 X11 的 Xft.dpi 并换算为缩放倍数；非 X11 会话或查询失败时返回 1.0（不补偿）
+#[cfg(target_os = "linux")]
+fn x11_xft_scale() -> f64 {
+    if let Ok(session) = std::env::var("XDG_SESSION_TYPE") {
+        if session != "x11" {
+            return 1.0;
+        }
+    }
+    let out = match std::process::Command::new("xrdb").arg("-query").output() {
+        Ok(o) => o,
+        Err(_) => return 1.0,
+    };
+    for line in String::from_utf8_lossy(&out.stdout).lines() {
+        if let Some(rest) = line.trim().strip_prefix("Xft.dpi:") {
+            if let Ok(dpi) = rest.trim().parse::<f64>() {
+                return (dpi / 96.0).max(1.0);
+            }
+        }
+    }
+    1.0
+}
+
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .setup(|app| {
+            // Linux 分数缩放（如 Deepin 4K 150%）下补偿初始窗口与网页内容尺寸
+            #[cfg(target_os = "linux")]
+            {
+                if let Some(win) = app.get_webview_window("main") {
+                    compensate_fractional_scale(&win);
+                }
+            }
+            #[cfg(not(target_os = "linux"))]
+            let _ = app;
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             chat_stream,
             chat_cancel,
