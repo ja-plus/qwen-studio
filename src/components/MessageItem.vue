@@ -138,6 +138,8 @@ function openPreview() {
                 <span v-if="statusText" class="st" :class="{ err: item.status === 'error', streaming: item.status === 'streaming' }">
                     {{ statusText }}
                 </span>
+                <span v-if="item.tps" class="tps"
+                    :title="`按流式增量估算的输出速率（共约 ${item.tk || 0} 个增量，含思考与工具参数）`">{{ item.tps }} token/s</span>
             </div>
             <details v-if="item.reasoning" class="reasoning-box" :open="reasoningOpen" @toggle="onReasoningToggle">
                 <summary>{{ item.status === 'streaming' ? `思考中（${item.reasoning.length} 字）…` : `思考过程（${item.reasoning.length} 字）` }}</summary>

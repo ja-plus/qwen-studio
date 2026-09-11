@@ -1,5 +1,8 @@
 import { reactive } from 'vue';
-import { modelLabel } from './models.js';
+import {
+    modelState, persistModelState, getProvider, getSelectedProvider,
+    prettifyModelId, QWEN_PROVIDER_ID,
+} from './models.js';
 import { startChat, abortChat, readFile, listDir, canUseTauri } from './bridge.js';
 import {
     TOOLS, executeTool, formatToolArgs, needsConfirm, toolMeta,
@@ -36,12 +39,10 @@ function loadConfirmMode() {
 }
 
 export const store = reactive({
-    apiKey: loadStr('qs.apiKey'),
-    baseUrl: loadStr('qs.baseUrl', 'https://dashscope.aliyuncs.com/compatible-mode/v1'),
-    model: saved.model || loadStr('qs.model', 'qwen3.8-max'),
     confirmMode: loadConfirmMode(),
     agentMode: loadFlag('qs.agent', true),
-    conversations: saved.conversations || [],   // [{id, title, workspace, model, messages, createdAt}]
+    // [{id, title, workspace, providerId, model, messages, createdAt}]（旧数据自动补 providerId）
+    conversations: (saved.conversations || []).map(c => c.providerId ? c : { ...c, providerId: QWEN_PROVIDER_ID }),
     projects: saved.projects || [],             // 已注册的项目文件夹路径
     activeId: saved.activeId || null,
     sending: false,
@@ -61,7 +62,7 @@ export const store = reactive({
     },
 });
 
-function persist() {
+export function persist() {
     // 瘦身持久化：reasoning/快照/diff预览不存、工具结果截断，避免撑爆 localStorage
     // （快照仅会话内有效，重启后不提供回滚）
     const slim = store.conversations.map(c => ({
@@ -80,9 +81,29 @@ function persist() {
             conversations: slim,
             projects: store.projects,
             activeId: store.activeId,
-            model: store.model,
+            model: modelState.selected.modelId,
         }));
     } catch { /* 超出配额则放弃本次保存 */ }
+}
+
+/** 同步工具栏选中项到指定会话（providerId 缺失时回退内置千问） */
+function syncSelectionFromConv(conv) {
+    if (!conv?.model) return;
+    modelState.selected.providerId = conv.providerId || QWEN_PROVIDER_ID;
+    modelState.selected.modelId = conv.model;
+    persistModelState();
+}
+
+/** 会话实际使用的供应商（会话未指定时回退当前选中 / 首个供应商） */
+function providerFor(conv) {
+    return getProvider(conv?.providerId)
+        || getProvider(modelState.selected.providerId)
+        || getSelectedProvider();
+}
+
+/** 当前会话使用的供应商（响应式，供 UI 校验 API Key 等） */
+export function currentProvider() {
+    return providerFor(store.activeConv);
 }
 
 // ---------- 对话 / 项目管理 ----------
@@ -92,7 +113,8 @@ export function newConversation(workspace = '') {
         id: uid('c'),
         title: '新对话',
         workspace: workspace || '',
-        model: store.model,
+        providerId: modelState.selected.providerId,
+        model: modelState.selected.modelId,
         messages: [],
         createdAt: Date.now(),
     };
@@ -113,7 +135,7 @@ export function switchConversation(id) {
     if (!conv) return;
     // 不再因流式输出中而阻止切换：进行中的回合会继续写入原会话（runTurn 已绑定会话对象）
     store.activeId = id;
-    if (conv.model) store.model = conv.model;
+    if (conv.model) syncSelectionFromConv(conv);
     if (conv.workspace) store.expandedProjects[conv.workspace] = true;
     store.error = '';
     persist();
@@ -124,7 +146,7 @@ export function deleteConversation(id) {
     if (store.activeId === id) {
         store.activeId = store.conversations[0]?.id || null;
         const conv = store.activeConv;
-        if (conv?.model) store.model = conv.model;
+        if (conv?.model) syncSelectionFromConv(conv);
     }
     persist();
 }
@@ -144,7 +166,7 @@ export function removeProject(path) {
     if (!store.activeConv) {
         store.activeId = store.conversations[0]?.id || null;
         const conv = store.activeConv;
-        if (conv?.model) store.model = conv.model;
+        if (conv?.model) syncSelectionFromConv(conv);
     }
     persist();
 }
@@ -184,17 +206,23 @@ export function toggleProjectFiles(ws) {
 
 // ---------- 模型切换：上下文同步 ----------
 
-export function switchModel(id) {
-    if (!id || id === store.model) return;
-    store.model = id;
+export function switchModel(providerId, modelId) {
+    if (!providerId || !modelId) return;
+    const sel = modelState.selected;
+    if (sel.providerId === providerId && sel.modelId === modelId) return;
+    sel.providerId = providerId;
+    sel.modelId = modelId;
+    persistModelState();
     const conv = store.activeConv;
     if (conv) {
-        conv.model = id;
+        conv.providerId = providerId;
+        conv.model = modelId;
+        const label = `${prettifyModelId(modelId)}（${getProvider(providerId)?.name || providerId}）`;
         const n = conv.messages.filter(m => m.role).length;
         conv.messages.push({
             id: uid('n'),
             type: 'notice',
-            content: n ? `已切换到 ${modelLabel(id)}，上下文（${n} 条消息）已同步` : `已切换到 ${modelLabel(id)}`,
+            content: n ? `已切换到 ${label}，上下文（${n} 条消息）已同步` : `已切换到 ${label}`,
             ts: Date.now(),
         });
     }
@@ -293,7 +321,7 @@ function systemPrompt(conv, ctx) {
         `  Working directory: ${conv.workspace}`,
         `  Platform: Windows (cmd shell)`,
         `  Today's date: ${new Date().toISOString().slice(0, 10)}`,
-        `  Model: ${conv.model || store.model}`,
+        `  Model: ${providerFor(conv)?.name || 'unknown'} · ${conv.model || modelState.selected.modelId}`,
         '</env>',
     );
     // 项目级上下文：AGENTS.md 指令 / .agents/rules 规则 / .agents/skills 技能目录
@@ -414,8 +442,9 @@ let activeRid = null;
 export async function sendMessage(text) {
     text = (text || '').trim();
     if (!text || store.sending) return;
-    if (!store.apiKey.trim()) {
-        store.error = '请先在设置中填写 DashScope API Key';
+    const provider = providerFor(store.activeConv);
+    if (!provider?.apiKey?.trim()) {
+        store.error = `请先在设置中为「${provider?.name || '供应商'}」填写 API Key`;
         return;
     }
     store.error = '';
@@ -447,10 +476,12 @@ const BEAUTIFY_SYSTEM = [
  * @returns {{ rid: string, done: Promise<{finish:string|null,error:string|null,aborted:boolean}> }}
  */
 export async function beautifyPrompt(text, handlers) {
+    const provider = providerFor(store.activeConv);
     const payload = {
-        apiKey: store.apiKey.trim() || null,
-        baseUrl: store.baseUrl.trim() || null,
-        model: store.model,
+        apiKey: provider?.apiKey?.trim() || null,
+        baseUrl: provider?.baseUrl?.trim() || null,
+        model: store.activeConv?.model || modelState.selected.modelId,
+        protocol: provider?.protocol || 'chat',
         messages: [
             { role: 'system', content: BEAUTIFY_SYSTEM },
             { role: 'user', content: text },
@@ -467,7 +498,7 @@ async function runTurn(conv) {
             const item = reactive({
                 id: uid('a'),
                 role: 'assistant',
-                model: conv.model || store.model,
+                model: conv.model || modelState.selected.modelId,
                 content: '',
                 reasoning: '',
                 status: 'streaming',
@@ -530,10 +561,12 @@ async function requestOnce(item, conv) {
     if (sys) messages.push({ role: 'system', content: sys });
     messages.push(...apiMessages(conv, attMap));
 
+    const provider = providerFor(conv);
     const payload = {
-        apiKey: store.apiKey.trim() || null,
-        baseUrl: store.baseUrl.trim() || null,
-        model: conv.model || store.model,
+        apiKey: provider?.apiKey?.trim() || null,
+        baseUrl: provider?.baseUrl?.trim() || null,
+        model: conv.model || modelState.selected.modelId,
+        protocol: provider?.protocol || 'chat',
         messages,
         stream: true,
     };
@@ -541,13 +574,34 @@ async function requestOnce(item, conv) {
     if (useTools) payload.tools = TOOLS;
     item.sentTools = useTools;
 
+    // 输出速率统计：流式每个增量（≈1 token）计 1，从首个输出事件起计时；
+    // 实时值节流刷新，结束后按全窗口精确重算
+    let tk = 0;        // 输出增量数（content/reasoning/工具参数各计 1）
+    let t0 = 0;        // 首个输出事件时刻
+    let lastAt = 0;    // 实时速率刷新节流
+    const bump = () => {
+        tk++;
+        const now = performance.now();
+        if (!t0) { t0 = now; lastAt = now; return; }
+        if (now - lastAt >= 250) {
+            lastAt = now;
+            item.tps = Math.round((tk / ((now - t0) / 1000)) * 10) / 10;
+        }
+    };
+
     const { rid, done } = await startChat(payload, {
-        onDelta: t => { item.content += t; },
-        onReasoning: t => { item.reasoning += t; },
-        onToolDelta: d => mergeToolCallDelta(item._tcAcc, d),
+        onDelta: t => { item.content += t; bump(); },
+        onReasoning: t => { item.reasoning += t; bump(); },
+        onToolDelta: d => { mergeToolCallDelta(item._tcAcc, d); bump(); },
     });
     activeRid = rid;
-    return await done;
+    const res = await done;
+    item.tk = tk;
+    if (tk >= 2 && t0) {
+        const sec = (performance.now() - t0) / 1000;
+        if (sec > 0) item.tps = Math.round((tk / sec) * 10) / 10;
+    }
+    return res;
 }
 
 /** 创建工具消息卡片（同步，保证并行时展示顺序与模型发起顺序一致） */

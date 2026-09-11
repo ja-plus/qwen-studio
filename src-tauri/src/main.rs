@@ -31,6 +31,8 @@ struct ChatReq {
     api_key: Option<String>,
     base_url: Option<String>,
     model: String,
+    /// API 协议：chat（默认）/ anthropic / responses
+    protocol: Option<String>,
     messages: Value,
     tools: Option<Value>,
 }
@@ -68,6 +70,7 @@ fn truncate_str(s: &str, max: usize) -> String {
 }
 
 async fn run_chat(app: AppHandle, rid: String, req: ChatReq) {
+    let protocol = req.protocol.clone().unwrap_or_else(|| "chat".to_string());
     let base = req
         .base_url
         .clone()
@@ -84,22 +87,17 @@ async fn run_chat(app: AppHandle, rid: String, req: ChatReq) {
     let key = match key {
         Some(k) => k,
         None => {
-            emit_chat(&app, &rid, "error", json!("缺少 API Key：请在设置中填写 DashScope API Key，或设置环境变量 DASHSCOPE_API_KEY"));
+            emit_chat(&app, &rid, "error", json!("缺少 API Key：请在设置中为当前供应商填写 API Key，或设置环境变量 DASHSCOPE_API_KEY"));
             emit_chat(&app, &rid, "done", Value::Null);
             return;
         }
     };
 
-    let mut body = json!({
-        "model": req.model,
-        "messages": req.messages,
-        "stream": true,
-    });
-    if let Some(tools) = &req.tools {
-        if tools.as_array().is_some_and(|a| !a.is_empty()) {
-            body["tools"] = tools.clone();
-        }
-    }
+    let body = match protocol.as_str() {
+        "anthropic" => anthropic_body(&req),
+        "responses" => responses_body(&req),
+        _ => chat_body(&req),
+    };
 
     let client = match reqwest::Client::builder().timeout(Duration::from_secs(600)).build() {
         Ok(c) => c,
@@ -110,13 +108,16 @@ async fn run_chat(app: AppHandle, rid: String, req: ChatReq) {
         }
     };
 
-    let resp = client
-        .post(format!("{base}/chat/completions"))
-        .bearer_auth(key)
-        .json(&body)
-        .send()
-        .await;
+    let url = resolve_url(&base, &protocol);
+    let request = match protocol.as_str() {
+        "anthropic" => client
+            .post(&url)
+            .header("x-api-key", key.clone())
+            .header("anthropic-version", "2023-06-01"),
+        _ => client.post(&url).bearer_auth(&key),
+    };
 
+    let resp = request.json(&body).send().await;
     let resp = match resp {
         Ok(r) => r,
         Err(e) => {
@@ -134,70 +135,454 @@ async fn run_chat(app: AppHandle, rid: String, req: ChatReq) {
         return;
     }
 
+    match protocol.as_str() {
+        "anthropic" => stream_sse(&app, &rid, resp, |d| handle_anthropic_sse(&app, &rid, d)).await,
+        "responses" => stream_sse(&app, &rid, resp, |d| handle_responses_sse(&app, &rid, d)).await,
+        _ => stream_sse(&app, &rid, resp, |d| handle_openai_sse(&app, &rid, d)).await,
+    }
+}
+
+// ---------- 请求构造（按协议转换 URL / 消息 / 工具） ----------
+
+/// 供应商 Base URL + 协议 → 请求地址。
+/// anthropic/responses 在 base 未带 /v1 时自动补上（兼容只填域名根的场景）。
+fn resolve_url(base: &str, protocol: &str) -> String {
+    let base = base.trim().trim_end_matches('/');
+    match protocol {
+        "anthropic" => {
+            if base.ends_with("/v1") {
+                format!("{base}/messages")
+            } else {
+                format!("{base}/v1/messages")
+            }
+        }
+        "responses" => {
+            if base.ends_with("/v1") {
+                format!("{base}/responses")
+            } else {
+                format!("{base}/v1/responses")
+            }
+        }
+        _ => format!("{base}/chat/completions"),
+    }
+}
+
+/// OpenAI Chat Completions 请求体（消息即前端规范格式，直接透传）
+fn chat_body(req: &ChatReq) -> Value {
+    let mut body = json!({
+        "model": req.model,
+        "messages": req.messages,
+        "stream": true,
+    });
+    if let Some(tools) = &req.tools {
+        if tools.as_array().is_some_and(|a| !a.is_empty()) {
+            body["tools"] = tools.clone();
+        }
+    }
+    body
+}
+
+/// OpenAI 工具定义 → Anthropic 工具定义（function.parameters → input_schema）
+fn tools_to_anthropic(tools: &Option<Value>) -> Option<Value> {
+    let arr = tools.as_ref()?.as_array()?;
+    let out: Vec<Value> = arr
+        .iter()
+        .filter_map(|t| {
+            let f = t.get("function")?;
+            Some(json!({
+                "name": f["name"],
+                "description": f["description"],
+                "input_schema": f["parameters"],
+            }))
+        })
+        .collect();
+    (!out.is_empty()).then(|| Value::Array(out))
+}
+
+/// Anthropic Messages 请求体：system 提取到顶层；tool_calls → tool_use；tool → tool_result（连续合并）
+fn anthropic_body(req: &ChatReq) -> Value {
+    let mut system_parts: Vec<String> = Vec::new();
+    let mut out: Vec<Value> = Vec::new();
+    for m in req.messages.as_array().cloned().unwrap_or_default() {
+        match m["role"].as_str().unwrap_or("") {
+            "system" => {
+                if let Some(c) = m["content"].as_str() {
+                    if !c.is_empty() {
+                        system_parts.push(c.to_string());
+                    }
+                }
+            }
+            "user" => {
+                if let Some(c) = m["content"].as_str() {
+                    if !c.is_empty() {
+                        push_user_block(&mut out, json!({ "type": "text", "text": c }));
+                    }
+                }
+            }
+            "assistant" => {
+                let mut blocks: Vec<Value> = Vec::new();
+                if let Some(c) = m["content"].as_str() {
+                    if !c.is_empty() {
+                        blocks.push(json!({ "type": "text", "text": c }));
+                    }
+                }
+                if let Some(tcs) = m["tool_calls"].as_array() {
+                    for tc in tcs {
+                        let input = tc["function"]["arguments"]
+                            .as_str()
+                            .and_then(|s| serde_json::from_str::<Value>(s).ok())
+                            .unwrap_or_else(|| json!({}));
+                        blocks.push(json!({
+                            "type": "tool_use",
+                            "id": tc["id"],
+                            "name": tc["function"]["name"],
+                            "input": input,
+                        }));
+                    }
+                }
+                if !blocks.is_empty() {
+                    out.push(json!({ "role": "assistant", "content": blocks }));
+                }
+            }
+            "tool" => {
+                let text = m["content"].as_str().unwrap_or("");
+                push_user_block(
+                    &mut out,
+                    json!({
+                        "type": "tool_result",
+                        "tool_use_id": m["tool_call_id"],
+                        "content": text,
+                    }),
+                );
+            }
+            _ => {}
+        }
+    }
+    let mut body = json!({
+        "model": req.model,
+        "max_tokens": 8192,
+        "messages": out,
+        "stream": true,
+    });
+    if !system_parts.is_empty() {
+        body["system"] = json!(system_parts.join("\n\n"));
+    }
+    if let Some(tools) = tools_to_anthropic(&req.tools) {
+        body["tools"] = tools;
+    }
+    body
+}
+
+/// 把 user 侧内容块并入上一条 user 消息（Anthropic 要求 user/assistant 严格交替，
+/// 连续的 user 文本与 tool_result 必须合并为同一条 user 消息）
+fn push_user_block(out: &mut Vec<Value>, block: Value) {
+    if let Some(last) = out.last_mut() {
+        if last["role"] == "user" {
+            if let Some(arr) = last["content"].as_array_mut() {
+                arr.push(block);
+                return;
+            }
+        }
+    }
+    out.push(json!({ "role": "user", "content": [block] }));
+}
+
+/// OpenAI 工具定义 → Responses 工具定义（扁平结构）
+fn tools_to_responses(tools: &Option<Value>) -> Option<Value> {
+    let arr = tools.as_ref()?.as_array()?;
+    let out: Vec<Value> = arr
+        .iter()
+        .filter_map(|t| {
+            let f = t.get("function")?;
+            Some(json!({
+                "type": "function",
+                "name": f["name"],
+                "description": f["description"],
+                "parameters": f["parameters"],
+            }))
+        })
+        .collect();
+    (!out.is_empty()).then(|| Value::Array(out))
+}
+
+/// OpenAI Responses 请求体：system → instructions；tool_calls → function_call；tool → function_call_output
+fn responses_body(req: &ChatReq) -> Value {
+    let mut instructions: Vec<String> = Vec::new();
+    let mut input: Vec<Value> = Vec::new();
+    for m in req.messages.as_array().cloned().unwrap_or_default() {
+        match m["role"].as_str().unwrap_or("") {
+            "system" => {
+                if let Some(c) = m["content"].as_str() {
+                    if !c.is_empty() {
+                        instructions.push(c.to_string());
+                    }
+                }
+            }
+            "user" => {
+                let text = m["content"].as_str().unwrap_or("");
+                input.push(json!({
+                    "role": "user",
+                    "content": [{ "type": "input_text", "text": text }],
+                }));
+            }
+            "assistant" => {
+                if let Some(c) = m["content"].as_str() {
+                    if !c.is_empty() {
+                        input.push(json!({
+                            "type": "message",
+                            "role": "assistant",
+                            "content": [{ "type": "output_text", "text": c }],
+                        }));
+                    }
+                }
+                if let Some(tcs) = m["tool_calls"].as_array() {
+                    for tc in tcs {
+                        input.push(json!({
+                            "type": "function_call",
+                            "call_id": tc["id"],
+                            "name": tc["function"]["name"],
+                            "arguments": tc["function"]["arguments"],
+                        }));
+                    }
+                }
+            }
+            "tool" => {
+                let text = m["content"].as_str().unwrap_or("");
+                input.push(json!({
+                    "type": "function_call_output",
+                    "call_id": m["tool_call_id"],
+                    "output": text,
+                }));
+            }
+            _ => {}
+        }
+    }
+    let mut body = json!({
+        "model": req.model,
+        "input": input,
+        "stream": true,
+    });
+    if !instructions.is_empty() {
+        body["instructions"] = json!(instructions.join("\n\n"));
+    }
+    if let Some(tools) = tools_to_responses(&req.tools) {
+        body["tools"] = tools;
+    }
+    body
+}
+
+// ---------- SSE 流转发与协议分片解析 ----------
+
+/// 通用 SSE 读取：按行拆出 `data:` 负载交给 on_data；结束统一发 done，
+/// 取消 / 超时 / 断流分别发 aborted / error。
+async fn stream_sse(app: &AppHandle, rid: &str, resp: reqwest::Response, mut on_data: impl FnMut(&str)) {
     let mut stream = resp.bytes_stream();
     let mut buf = String::new();
 
     loop {
-        if CANCELLED.lock().unwrap().remove(&rid) {
-            emit_chat(&app, &rid, "aborted", Value::Null);
+        if CANCELLED.lock().unwrap().remove(rid) {
+            emit_chat(app, rid, "aborted", Value::Null);
             break;
         }
         let next = tokio::time::timeout(Duration::from_secs(180), stream.next()).await;
         match next {
             Err(_) => {
-                emit_chat(&app, &rid, "error", json!("数据流读取超时（180 秒无输出）"));
+                emit_chat(app, rid, "error", json!("数据流读取超时（180 秒无输出）"));
                 break;
             }
             Ok(None) => break,
             Ok(Some(Err(e))) => {
-                emit_chat(&app, &rid, "error", json!(format!("数据流中断: {e}")));
+                emit_chat(app, rid, "error", json!(format!("数据流中断: {e}")));
                 break;
             }
             Ok(Some(Ok(chunk))) => {
                 buf.push_str(&String::from_utf8_lossy(&chunk));
                 while let Some(pos) = buf.find('\n') {
                     let line: String = buf.drain(..=pos).collect();
-                    let line = line.trim().to_string();
-                    if !line.starts_with("data:") {
+                    let line = line.trim();
+                    let Some(data) = line.strip_prefix("data:") else {
                         continue;
-                    }
-                    let data = line[5..].trim();
+                    };
+                    let data = data.trim();
                     if data == "[DONE]" {
                         continue;
                     }
-                    let Ok(v) = serde_json::from_str::<Value>(data) else {
-                        continue;
-                    };
-                    if let Some(err) = v["error"]["message"].as_str() {
-                        emit_chat(&app, &rid, "error", json!(err));
-                        continue;
-                    }
-                    let choice = &v["choices"][0];
-                    let delta = &choice["delta"];
-                    if let Some(c) = delta["content"].as_str() {
-                        if !c.is_empty() {
-                            emit_chat(&app, &rid, "delta", json!(c));
-                        }
-                    }
-                    if let Some(c) = delta["reasoning_content"].as_str() {
-                        if !c.is_empty() {
-                            emit_chat(&app, &rid, "reasoning", json!(c));
-                        }
-                    }
-                    if let Some(tc) = delta["tool_calls"].as_array() {
-                        if !tc.is_empty() {
-                            emit_chat(&app, &rid, "tool", Value::Array(tc.clone()));
-                        }
-                    }
-                    if let Some(fr) = choice["finish_reason"].as_str() {
-                        emit_chat(&app, &rid, "finish", json!(fr));
-                    }
+                    on_data(data);
                 }
             }
         }
     }
 
-    emit_chat(&app, &rid, "done", Value::Null);
+    emit_chat(app, rid, "done", Value::Null);
+}
+
+/// OpenAI Chat Completions SSE 分片 → 前端事件
+fn handle_openai_sse(app: &AppHandle, rid: &str, data: &str) {
+    let Ok(v) = serde_json::from_str::<Value>(data) else {
+        return;
+    };
+    if let Some(err) = v["error"]["message"].as_str() {
+        emit_chat(app, rid, "error", json!(err));
+        return;
+    }
+    let choice = &v["choices"][0];
+    let delta = &choice["delta"];
+    if let Some(c) = delta["content"].as_str() {
+        if !c.is_empty() {
+            emit_chat(app, rid, "delta", json!(c));
+        }
+    }
+    if let Some(c) = delta["reasoning_content"].as_str() {
+        if !c.is_empty() {
+            emit_chat(app, rid, "reasoning", json!(c));
+        }
+    }
+    if let Some(tc) = delta["tool_calls"].as_array() {
+        if !tc.is_empty() {
+            emit_chat(app, rid, "tool", Value::Array(tc.clone()));
+        }
+    }
+    if let Some(fr) = choice["finish_reason"].as_str() {
+        emit_chat(app, rid, "finish", json!(fr));
+    }
+}
+
+/// Anthropic Messages SSE 分片 → 前端事件
+fn handle_anthropic_sse(app: &AppHandle, rid: &str, data: &str) {
+    let Ok(v) = serde_json::from_str::<Value>(data) else {
+        return;
+    };
+    match v["type"].as_str().unwrap_or("") {
+        "content_block_start" => {
+            let cb = &v["content_block"];
+            if cb["type"] == "tool_use" {
+                emit_chat(
+                    app,
+                    rid,
+                    "tool",
+                    json!([{
+                        "index": v["index"],
+                        "id": cb["id"],
+                        "function": { "name": cb["name"] },
+                    }]),
+                );
+            }
+        }
+        "content_block_delta" => {
+            let d = &v["delta"];
+            match d["type"].as_str().unwrap_or("") {
+                "text_delta" => {
+                    if let Some(t) = d["text"].as_str() {
+                        if !t.is_empty() {
+                            emit_chat(app, rid, "delta", json!(t));
+                        }
+                    }
+                }
+                "thinking_delta" => {
+                    if let Some(t) = d["thinking"].as_str() {
+                        if !t.is_empty() {
+                            emit_chat(app, rid, "reasoning", json!(t));
+                        }
+                    }
+                }
+                "input_json_delta" => {
+                    if let Some(p) = d["partial_json"].as_str() {
+                        if !p.is_empty() {
+                            emit_chat(
+                                app,
+                                rid,
+                                "tool",
+                                json!([{
+                                    "index": v["index"],
+                                    "function": { "arguments": p },
+                                }]),
+                            );
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        "message_delta" => {
+            if let Some(fr) = v["delta"]["stop_reason"].as_str() {
+                emit_chat(app, rid, "finish", json!(fr));
+            }
+        }
+        "error" => {
+            let msg = v["error"]["message"].as_str().unwrap_or("Anthropic 接口返回错误");
+            emit_chat(app, rid, "error", json!(msg));
+        }
+        _ => {}
+    }
+}
+
+/// OpenAI Responses SSE 分片 → 前端事件
+fn handle_responses_sse(app: &AppHandle, rid: &str, data: &str) {
+    let Ok(v) = serde_json::from_str::<Value>(data) else {
+        return;
+    };
+    match v["type"].as_str().unwrap_or("") {
+        "response.output_text.delta" => {
+            if let Some(t) = v["delta"].as_str() {
+                if !t.is_empty() {
+                    emit_chat(app, rid, "delta", json!(t));
+                }
+            }
+        }
+        "response.reasoning_summary_text.delta" | "response.reasoning_text.delta" => {
+            if let Some(t) = v["delta"].as_str() {
+                if !t.is_empty() {
+                    emit_chat(app, rid, "reasoning", json!(t));
+                }
+            }
+        }
+        "response.output_item.added" => {
+            let item = &v["item"];
+            if item["type"] == "function_call" {
+                emit_chat(
+                    app,
+                    rid,
+                    "tool",
+                    json!([{
+                        "index": v["output_index"],
+                        "id": item["call_id"],
+                        "function": { "name": item["name"] },
+                    }]),
+                );
+            }
+        }
+        "response.function_call_arguments.delta" => {
+            if let Some(t) = v["delta"].as_str() {
+                if !t.is_empty() {
+                    emit_chat(
+                        app,
+                        rid,
+                        "tool",
+                        json!([{
+                            "index": v["output_index"],
+                            "function": { "arguments": t },
+                        }]),
+                    );
+                }
+            }
+        }
+        "response.completed" => emit_chat(app, rid, "finish", json!("stop")),
+        "response.incomplete" => emit_chat(app, rid, "finish", json!("incomplete")),
+        "response.failed" => {
+            let msg = v["response"]["error"]["message"]
+                .as_str()
+                .unwrap_or("Responses 接口返回失败");
+            emit_chat(app, rid, "error", json!(msg));
+        }
+        "error" => {
+            let msg = v["message"]
+                .as_str()
+                .or_else(|| v["error"]["message"].as_str())
+                .unwrap_or("Responses 接口返回错误");
+            emit_chat(app, rid, "error", json!(msg));
+        }
+        _ => {}
+    }
 }
 
 #[tauri::command]
@@ -214,6 +599,73 @@ async fn chat_stream(app: AppHandle, req: ChatReq) -> Result<String, String> {
 #[tauri::command]
 fn chat_cancel(rid: String) {
     CANCELLED.lock().unwrap().insert(rid);
+}
+
+// ---------- 千问可用模型列表（platform.qianwenai.com 数据接口） ----------
+
+/// application/x-www-form-urlencoded 值编码
+fn url_encode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() * 3);
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => out.push(b as char),
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
+/// 拉取千问平台可用模型 ID 列表（token-plan 接口，无需鉴权）
+#[tauri::command]
+async fn fetch_qwen_models() -> Result<Vec<String>, String> {
+    let params = json!({
+        "Api": "zeldaEasy.bmp.bmpTokenPlanServcie.modelIdList",
+        "Data": {
+            "edition": "PERSONAL",
+            "cornerstoneParam": {
+                "domain": "platform.qianwenai.com",
+                "consoleSite": "QIANWENAI",
+                "console": "ONE_CONSOLE",
+                "xsp_lang": "zh-CN",
+                "protocol": "V2",
+                "productCode": "p_efm"
+            }
+        },
+        "V": "1.0"
+    });
+    let body = format!(
+        "product={}&action={}&region={}&params={}",
+        url_encode("sfm_bailian"),
+        url_encode("BroadScopeAspnGateway"),
+        url_encode("cn-beijing"),
+        url_encode(&params.to_string()),
+    );
+    let url = "https://cs-data.qianwenai.com/data/api.json?product=sfm_bailian&action=BroadScopeAspnGateway&api=zeldaEasy.bmp.bmpTokenPlanServcie.modelIdList";
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(20))
+        .build()
+        .map_err(|e| format!("创建 HTTP 客户端失败: {e}"))?;
+    let resp = client
+        .post(url)
+        .header("accept", "application/json, text/plain, */*")
+        .header("referer", "https://platform.qianwenai.com/home/analytics/token-plan/individual")
+        .header("content-type", "application/x-www-form-urlencoded")
+        .body(body)
+        .send()
+        .await
+        .map_err(|e| format!("网络请求失败: {e}"))?;
+    if !resp.status().is_success() {
+        return Err(format!("HTTP {}", resp.status().as_u16()));
+    }
+    let v: Value = resp.json().await.map_err(|e| format!("响应解析失败: {e}"))?;
+    let arr = v["data"]["DataV2"]["data"]["data"]
+        .as_array()
+        .ok_or_else(|| format!("接口返回结构异常：{}", truncate_str(&v.to_string(), 300)))?;
+    let ids: Vec<String> = arr.iter().filter_map(|x| x.as_str().map(str::to_string)).collect();
+    if ids.is_empty() {
+        return Err("接口返回的模型列表为空".into());
+    }
+    Ok(ids)
 }
 
 // ---------- 工作区文件命令（路径限制在工作目录内） ----------
@@ -662,6 +1114,7 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             chat_stream,
             chat_cancel,
+            fetch_qwen_models,
             node_tool,
             list_dir,
             read_file,

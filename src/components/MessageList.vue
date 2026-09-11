@@ -124,6 +124,7 @@ function follow() {
 watch(
   () => store.messages.length,
   () => {
+    pruneRowHeights();
     const last = store.messages[store.messages.length - 1];
     if (last?.role === "user") stickBottom = true;
     if (stickBottom) scrollToBottom();
@@ -164,6 +165,77 @@ watch(
     }
   },
 );
+
+// ---------- 行高实时同步（修复流式/动态内容的向下虚拟滚动） ----------
+//
+// 根因：stk-table 变高模式对每行「只测量一次」——autoRowHeightMap.has(rowKey) 后
+// 便跳过重测（useVirtualScroll 的批量测量分支）。AI 流式时最后一条消息的 tr 实际
+// 高度不断增长，但虚拟滚动仍用首次缓存的小高度算总高（Fenwick 树），于是：
+//   - 容器 scrollHeight 被低估，`scrollTop = scrollHeight` 到不了真实底部；
+//   - 向下滚动时 startIndex/offsetTop 与真实 DOM 错位 → 空白、跳动、滚不到底。
+//
+// 方案：ResizeObserver 监听渲染区 tbody，任一帧布局变化后重新测量当前渲染的各行 tr，
+// 把真实 offsetHeight 通过组件暴露的 setAutoHeight(rowKey, height) 回灌进树，再触发重算。
+// 流式增长、工具结果展开、思考框折叠等一切行高变化都被覆盖；行滚出视口由 stk-table
+// 自行回收/首测，故只需关心「已进入缓存后的高度变化」。
+const lastRowHeights = new Map(); // rowKey -> 上次回灌的高度，避免重复 setAutoHeight
+let rowSizeRO = null;
+let rowSizeTarget = null;
+let rowRaf = 0;
+
+function scheduleRowResync() {
+  if (rowRaf) return;
+  rowRaf = requestAnimationFrame(() => {
+    rowRaf = 0;
+    resyncRowHeights();
+  });
+}
+
+function resyncRowHeights() {
+  const stk = stkRef.value;
+  if (!stk?.setAutoHeight || !rowSizeTarget) return;
+  const trs = rowSizeTarget.querySelectorAll("tr[data-row-key]");
+  let changed = false;
+  for (const tr of trs) {
+    const key = tr.dataset.rowKey;
+    if (!key) continue;
+    const h = tr.offsetHeight;
+    if (h && lastRowHeights.get(key) !== h) {
+      lastRowHeights.set(key, h);
+      stk.setAutoHeight(key, h);
+      changed = true;
+    }
+  }
+  if (!changed) return;
+  // 贴底：直接吸附底部（scroll 事件会带动窗口重算）；非贴底：仅按当前 scrollTop 重算，
+  // 保持阅读位置不动（流式行在视口下方，增长不影响上方行的偏移）。
+  if (stickBottom) scrollBottomNow();
+  else stk.initVirtualScrollY?.();
+}
+
+function attachRowSizeObserver() {
+  const wrap = wrapRef.value;
+  if (!wrap) return;
+  const target = wrap.querySelector("tbody") || wrap.querySelector(".stk-table");
+  if (!target || target === rowSizeTarget) return;
+  if (!rowSizeRO) rowSizeRO = new ResizeObserver(scheduleRowResync);
+  else rowSizeRO.disconnect();
+  rowSizeRO.observe(target);
+  rowSizeTarget = target;
+  lastRowHeights.clear(); // 换目标后旧测量作废，让 stk 首测与本轮重测对齐
+}
+
+// 数据变化时清理已删除行的缓存，避免 Map 无界增长
+function pruneRowHeights() {
+  if (!lastRowHeights.size) return;
+  const valid = new Set(store.messages.map((m) => String(m.id)));
+  for (const k of lastRowHeights.keys()) if (!valid.has(k)) lastRowHeights.delete(k);
+}
+
+// 空列表↔有列表切换会重建 StkTable（tbody 换新节点），需重挂观察器
+watch(empty, (isEmpty) => {
+  if (!isEmpty) nextTick(() => (attachRowSizeObserver(), scheduleRowResync()));
+});
 
 // ---------- 一问一答圆点导航 ----------
 
@@ -220,6 +292,7 @@ function invalidateRowHeights() {
   const el = scrollEl();
   const st = el ? el.scrollTop : 0;
   stkRef.value?.clearAllAutoHeight?.();
+  lastRowHeights.clear(); // 与 stk 的行高缓存同步作废，下轮重测重新回灌
   nextTick(() => {
     if (el) el.scrollTop = st;
     updateActiveExchange();
@@ -256,11 +329,16 @@ onMounted(() => {
     setTimeout(scrollToBottom, 400),
     setTimeout(scrollToBottom, 1000),
   );
+
+  // 挂载行高实时同步观察器（tbody 可能尚未渲染，nextTick 兜底）
+  nextTick(attachRowSizeObserver);
 });
 
 onBeforeUnmount(() => {
   resizeObserver?.disconnect();
+  rowSizeRO?.disconnect();
   clearTimeout(widthTimer);
+  if (rowRaf) cancelAnimationFrame(rowRaf);
   initTimers.forEach(clearTimeout);
   clearInterval(followTimer);
 });

@@ -51,6 +51,13 @@ export async function startChat(req, handlers) {
 }
 
 async function browserChat(req, handlers) {
+    if (req.protocol && req.protocol !== 'chat') {
+        return {
+            finish: null,
+            error: '浏览器预览模式仅支持 Chat Completions 协议，请运行桌面版（pnpm tauri dev）',
+            aborted: false,
+        };
+    }
     const base = (req.baseUrl || 'https://dashscope.aliyuncs.com/compatible-mode/v1').replace(/\/+$/, '');
     let body = { model: req.model, messages: req.messages, stream: true };
     if (req.tools?.length) body.tools = req.tools;

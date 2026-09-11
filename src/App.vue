@@ -1,6 +1,7 @@
 <script setup>
-import { ref, computed, watch } from 'vue';
+import { ref, computed, watch, onMounted } from 'vue';
 import { store, newConversation, setConversationWorkspace } from './lib/chat.js';
+import { refreshQwenModels } from './lib/models.js';
 import { pickFolder, canUseTauri, runCommand } from './lib/bridge.js';
 import ConversationNav from './components/ConversationNav.vue';
 import MessageList from './components/MessageList.vue';
@@ -66,6 +67,9 @@ watch(() => store.workspace, refreshBranch, { immediate: true });
 watch(() => store.treeVersion, refreshBranch);
 watch(() => store.sending, v => { if (!v) refreshBranch(); });
 
+// 启动时后台拉取千问可用模型（失败保留缓存，不阻塞 UI）
+onMounted(() => { refreshQwenModels(); });
+
 async function linkFolder() {
     try {
         const dir = await pickFolder();
@@ -87,7 +91,7 @@ function onPreview(path) {
                 <div class="logo">Q</div>
                 <div>
                     <div class="title">Qwen Studio</div>
-                    <div class="sub">DashScope · 多模型 Agent</div>
+                    <div class="sub">多供应商 · 多协议 Agent</div>
                 </div>
             </div>
             <div class="side-scroll">

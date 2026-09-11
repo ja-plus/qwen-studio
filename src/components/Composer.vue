@@ -1,11 +1,14 @@
 <script setup>
-import { ref, reactive, nextTick } from 'vue';
-import { store, sendMessage, stopGenerating, beautifyPrompt } from '../lib/chat.js';
+import { ref, reactive, computed, nextTick } from 'vue';
+import { store, sendMessage, stopGenerating, beautifyPrompt, currentProvider } from '../lib/chat.js';
 import { listDir, abortChat } from '../lib/bridge.js';
 import ModelPicker from './ModelPicker.vue';
 
 const emit = defineEmits(['open-settings']);
 const taRef = ref(null);
+
+// 当前会话供应商是否已配置 API Key（响应式，随供应商切换更新）
+const hasApiKey = computed(() => !!currentProvider()?.apiKey?.trim());
 
 // ---------- 提示词美化 ----------
 
@@ -21,8 +24,8 @@ async function beautify() {
         return;
     }
     if (!t || store.sending) return;
-    if (!store.apiKey) {
-        store.error = '请先在设置中填写 DashScope API Key';
+    if (!hasApiKey.value) {
+        store.error = `请先在设置中为「${currentProvider()?.name || '供应商'}」填写 API Key`;
         return;
     }
     closeMention();
@@ -219,7 +222,7 @@ function onKeydown(e) {
                             {{ m.label }}
                         </button>
                     </div>
-                    <span v-if="!store.apiKey" class="hint" style="color: var(--yellow); cursor: pointer;"
+                    <span v-if="!hasApiKey" class="hint" style="color: var(--yellow); cursor: pointer;"
                         @click="emit('open-settings')">⚠ 未设置 API Key</span>
                     <span class="spacer" style="flex: 1;"></span>
                     <ModelPicker />

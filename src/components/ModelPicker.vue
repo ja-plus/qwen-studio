@@ -1,29 +1,27 @@
 <script setup>
 import { ref, computed, onMounted, onBeforeUnmount } from 'vue';
-import { store, switchModel } from '../lib/chat.js';
-import { MODEL_GROUPS, findModel } from '../lib/models.js';
+import { switchModel } from '../lib/chat.js';
+import { modelState, prettifyModelId, findModel, getProvider } from '../lib/models.js';
 
 const open = ref(false);
-const customId = ref('');
 const rootRef = ref(null);
 
+const selected = computed(() => modelState.selected);
+// 仅展示有模型的供应商分组
+const groups = computed(() => modelState.providers.filter(p => p.models.length));
+
 const shortLabel = computed(() => {
-    const m = findModel(store.model);
-    return m ? m.name : store.model;
+    const hit = findModel(selected.value.providerId, selected.value.modelId);
+    return hit ? prettifyModelId(hit.id) : selected.value.modelId;
 });
-const isPreset = computed(() => !!findModel(store.model));
+const fullTitle = computed(() => {
+    const p = getProvider(selected.value.providerId);
+    return `${p ? p.name + ' · ' : ''}${selected.value.modelId}`;
+});
 
-function select(id) {
+function select(providerId, modelId) {
     open.value = false;
-    switchModel(id);
-}
-
-function applyCustom() {
-    const id = customId.value.trim();
-    if (!id) return;
-    customId.value = '';
-    open.value = false;
-    switchModel(id);
+    switchModel(providerId, modelId);
 }
 
 function onDocClick(e) {
@@ -35,33 +33,23 @@ onBeforeUnmount(() => document.removeEventListener('click', onDocClick));
 
 <template>
     <div ref="rootRef" class="model-picker">
-        <button class="model-btn" :title="store.model" @click="open = !open">
+        <button class="model-btn" :title="fullTitle" @click="open = !open">
             <span class="dot"></span>{{ shortLabel }}<span class="caret">▴</span>
         </button>
         <div v-if="open" class="model-pop">
-            <template v-for="group in MODEL_GROUPS" :key="group.label">
-                <div class="group-label">{{ group.label }}</div>
-                <div v-for="m in group.models" :key="m.id" class="m-opt" :class="{ active: store.model === m.id }"
-                    @click="select(m.id)">
+            <template v-for="p in groups" :key="p.id">
+                <div class="group-label">{{ p.name }}</div>
+                <div v-for="id in p.models" :key="p.id + '/' + id" class="m-opt"
+                    :class="{ active: selected.providerId === p.id && selected.modelId === id }"
+                    @click="select(p.id, id)">
                     <div class="m-line1">
-                        <span>{{ m.name }}</span>
-                        <span class="vendor-tag">{{ m.vendor }}</span>
-                        <span v-if="store.model === m.id" class="check">✓</span>
+                        <span>{{ prettifyModelId(id) }}</span>
+                        <span v-if="selected.providerId === p.id && selected.modelId === id" class="check">✓</span>
                     </div>
-                    <div class="m-id">{{ m.id }}</div>
+                    <div class="m-id">{{ id }}</div>
                 </div>
             </template>
-            <template v-if="!isPreset">
-                <div class="group-label">自定义模型</div>
-                <div class="m-opt active">
-                    <div class="m-line1"><span>{{ shortLabel }}</span><span class="vendor-tag">Custom</span><span class="check">✓</span></div>
-                    <div class="m-id">{{ store.model }}</div>
-                </div>
-            </template>
-            <div class="custom-row">
-                <input v-model="customId" class="input" placeholder="自定义模型 ID" @keyup.enter="applyCustom" />
-                <button class="btn small" @click="applyCustom">使用</button>
-            </div>
+            <div v-if="!groups.length" class="group-label">暂无模型：请到设置中配置供应商与模型</div>
         </div>
     </div>
 </template>
