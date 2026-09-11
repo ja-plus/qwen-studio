@@ -45,6 +45,20 @@ const statusText = computed(() => {
     }
 });
 
+// 速率口径说明：token 数优先取接口 usage 真实用量，时间窗只算纯输出段（不含首字等待与收尾包）
+const tpsTitle = computed(() => {
+    const it = props.item;
+    const tk = it.outTk ?? '?';
+    const win = it.tpsWinMs ? `${(it.tpsWinMs / 1000).toFixed(1)}s` : '?';
+    return [
+        `${tk} token ÷ 有效输出 ${win}（不含首字等待）`,
+        it.tpsExact ? 'token 数取接口 usage 真实用量' : 'token 数按字符量估算',
+        '统计含思考与工具参数',
+        it.status === 'streaming' ? '生成中为实时近似值' : '',
+        it.ttftMs ? `首字延迟 ${(it.ttftMs / 1000).toFixed(2)}s` : '',
+    ].filter(Boolean).join('｜');
+});
+
 // 文件类工具：提取路径用于徽章与预览
 const fileInfo = computed(() => {
     const it = props.item;
@@ -138,8 +152,9 @@ function openPreview() {
                 <span v-if="statusText" class="st" :class="{ err: item.status === 'error', streaming: item.status === 'streaming' }">
                     {{ statusText }}
                 </span>
-                <span v-if="item.tps" class="tps"
-                    :title="`按流式增量估算的输出速率（共约 ${item.tk || 0} 个增量，含思考与工具参数）`">{{ item.tps }} token/s</span>
+                <span v-if="item.tps" class="tps" :title="tpsTitle">
+                    {{ item.tpsExact ? '' : '≈' }}{{ item.tps }} token/s
+                </span>
             </div>
             <details v-if="item.reasoning" class="reasoning-box" :open="reasoningOpen" @toggle="onReasoningToggle">
                 <summary>{{ item.status === 'streaming' ? `思考中（${item.reasoning.length} 字）…` : `思考过程（${item.reasoning.length} 字）` }}</summary>

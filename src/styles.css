@@ -858,7 +858,7 @@ body {
     color: var(--yellow);
 }
 
-/* 输出速率（实时节流刷新，等宽数字避免抖动） */
+/* 输出速率（流中为近似值，结束后按接口 usage + 后端实测窗口结算；等宽数字避免抖动） */
 .msg .who .tps {
     font-size: 11px;
     color: var(--green);

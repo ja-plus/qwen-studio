@@ -21,11 +21,18 @@ async function ensureListen() {
             case 'reasoning': h.onReasoning?.(data); break;
             case 'tool': h.onToolDelta?.(data); break;
             case 'finish': entry.finish = data; break;
+            // 后端实测的时间基准（首字延迟、纯输出窗口）+ 真实 token 用量，速率统计以它为准
+            case 'timing': entry.timing = data; break;
             case 'error': entry.error = data; break;
             case 'aborted': entry.aborted = true; break;
             case 'done':
                 registry.delete(rid);
-                entry.settle({ finish: entry.finish ?? null, error: entry.error ?? null, aborted: !!entry.aborted });
+                entry.settle({
+                    finish: entry.finish ?? null,
+                    error: entry.error ?? null,
+                    aborted: !!entry.aborted,
+                    timing: entry.timing ?? null,
+                });
                 break;
         }
     });
@@ -33,7 +40,7 @@ async function ensureListen() {
 
 /**
  * 发起流式对话请求。
- * @returns {{ rid: string, done: Promise<{finish:string|null,error:string|null,aborted:boolean}> }}
+ * @returns {{ rid: string, done: Promise<{finish:string|null,error:string|null,aborted:boolean,timing:object|null}> }}
  */
 export async function startChat(req, handlers) {
     if (canUseTauri) {
@@ -56,13 +63,25 @@ async function browserChat(req, handlers) {
             finish: null,
             error: '浏览器预览模式仅支持 Chat Completions 协议，请运行桌面版（pnpm tauri dev）',
             aborted: false,
+            timing: null,
         };
     }
     const base = (req.baseUrl || 'https://dashscope.aliyuncs.com/compatible-mode/v1').replace(/\/+$/, '');
-    let body = { model: req.model, messages: req.messages, stream: true };
+    let body = {
+        model: req.model,
+        messages: req.messages,
+        stream: true,
+        stream_options: { include_usage: true },
+    };
     if (req.tools?.length) body.tools = req.tools;
     let finish = null;
     let error = null;
+    // 与桌面版同口径：时间窗口只覆盖输出分片，token 数优先取接口用量
+    const tReq = performance.now();
+    let tFirst = 0;
+    let tLast = 0;
+    let chunks = 0;
+    let tokens = null;
     try {
         const resp = await fetch(`${base}/chat/completions`, {
             method: 'POST',
@@ -92,18 +111,35 @@ async function browserChat(req, handlers) {
                 if (data === '[DONE]') continue;
                 let v;
                 try { v = JSON.parse(data); } catch { continue; }
+                if (typeof v.usage?.completion_tokens === 'number') tokens = v.usage.completion_tokens;
                 const choice = v.choices?.[0] || {};
                 const delta = choice.delta || {};
-                if (delta.content) handlers.onDelta?.(delta.content);
-                if (delta.reasoning_content) handlers.onReasoning?.(delta.reasoning_content);
-                if (delta.tool_calls?.length) handlers.onToolDelta?.(delta.tool_calls);
+                let out = false;
+                if (delta.content) { out = true; handlers.onDelta?.(delta.content); }
+                if (delta.reasoning_content) { out = true; handlers.onReasoning?.(delta.reasoning_content); }
+                if (delta.tool_calls?.length) { out = true; handlers.onToolDelta?.(delta.tool_calls); }
+                if (out) {
+                    const now = performance.now();
+                    if (!tFirst) tFirst = now;
+                    tLast = now;
+                    chunks++;
+                }
                 if (choice.finish_reason) finish = choice.finish_reason;
             }
         }
     } catch (e) {
         error = `浏览器直连失败（${e.message}）。桌面版经 Tauri 代理无此限制，请运行 pnpm tauri dev`;
     }
-    return { finish, error, aborted: false };
+    const timing = tFirst
+        ? {
+            ttftMs: Math.round(tFirst - tReq),
+            decodeMs: Math.round(tLast - tFirst),
+            totalMs: Math.round(performance.now() - tReq),
+            completionTokens: tokens,
+            chunks,
+        }
+        : null;
+    return { finish, error, aborted: false, timing };
 }
 
 export async function abortChat(rid) {

@@ -554,6 +554,52 @@ async function runTurn(conv) {
     }
 }
 
+// ---------- 输出速率统计 ----------
+
+// 中日韩与全角字符：千问词表下约 1.4 字 = 1 token；其余文本约 4 字符 = 1 token
+const CJK_RE = /[\u2e80-\u303f\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uac00-\ud7af\uf900-\ufaff\uff00-\uffef]/;
+
+/** 接口未回 usage 时的兜底：按字符量粗估 token 数 */
+function estimateTokens(text) {
+    if (!text) return 0;
+    let cjk = 0;
+    let rest = 0;
+    for (const ch of text) {
+        if (CJK_RE.test(ch)) cjk++;
+        else rest++;
+    }
+    return Math.round(cjk * 0.7 + rest / 4);
+}
+
+/** 本轮输出的全部文本（正文 + 思考 + 工具调用参数），它们都占用解码量 */
+function outputText(item) {
+    const args = Object.values(item._tcAcc || {}).map(tc => tc.function?.arguments || '').join('');
+    return (item.content || '') + (item.reasoning || '') + args;
+}
+
+/** 速率 = token 数 ÷ 输出窗口；样本太少或窗口太短不给数，避免噪声 */
+function tokenRate(tokens, windowMs) {
+    if (!(tokens >= 2) || !(windowMs >= 200)) return 0;
+    return Math.round((tokens / (windowMs / 1000)) * 10) / 10;
+}
+
+/**
+ * 结算一次请求的输出速率。
+ * token 数优先取接口 usage 的真实用量（含思考与工具参数），缺失时按字符估算；
+ * 时间窗口优先用后端实测的“首个输出分片 → 末个输出分片”，
+ * 避开首字等待、IPC 批量投递与渲染卡顿对 JS 时间戳的污染。
+ */
+function settleRate(item, timing, jsFirst, jsLast) {
+    const real = typeof timing?.completionTokens === 'number' ? timing.completionTokens : 0;
+    const tokens = real > 0 ? real : estimateTokens(outputText(item));
+    const windowMs = timing ? (timing.decodeMs || 0) : (jsLast - jsFirst);
+    item.outTk = tokens;
+    item.tpsExact = real > 0;         // 统计口径：接口真实用量 / 字符估算
+    item.ttftMs = timing?.ttftMs || 0;
+    item.tpsWinMs = Math.round(windowMs || 0);
+    item.tps = tokenRate(tokens, windowMs);
+}
+
 async function requestOnce(item, conv) {
     const messages = [];
     const [ctx, attMap] = await Promise.all([loadProjectContext(conv), resolveAttachments(conv)]);
@@ -574,19 +620,19 @@ async function requestOnce(item, conv) {
     if (useTools) payload.tools = TOOLS;
     item.sentTools = useTools;
 
-    // 输出速率统计：流式每个增量（≈1 token）计 1，从首个输出事件起计时；
-    // 实时值节流刷新，结束后按全窗口精确重算
-    let tk = 0;        // 输出增量数（content/reasoning/工具参数各计 1）
-    let t0 = 0;        // 首个输出事件时刻
-    let lastAt = 0;    // 实时速率刷新节流
+    // 实时速率：每个输出分片刷新一次（节流 250ms）。流式过程中拿不到 usage，
+    // 只能字符估算 + 前端时间戳做近似，结束后被 settleRate 的精确值覆盖
+    let tFirst = 0;
+    let tLast = 0;
+    let tShown = 0;
     const bump = () => {
-        tk++;
         const now = performance.now();
-        if (!t0) { t0 = now; lastAt = now; return; }
-        if (now - lastAt >= 250) {
-            lastAt = now;
-            item.tps = Math.round((tk / ((now - t0) / 1000)) * 10) / 10;
-        }
+        if (!tFirst) tFirst = now;
+        tLast = now;
+        if (now - tShown < 250) return;
+        tShown = now;
+        const r = tokenRate(estimateTokens(outputText(item)), tLast - tFirst);
+        if (r) item.tps = r;
     };
 
     const { rid, done } = await startChat(payload, {
@@ -596,11 +642,7 @@ async function requestOnce(item, conv) {
     });
     activeRid = rid;
     const res = await done;
-    item.tk = tk;
-    if (tk >= 2 && t0) {
-        const sec = (performance.now() - t0) / 1000;
-        if (sec > 0) item.tps = Math.round((tk / sec) * 10) / 10;
-    }
+    settleRate(item, res.timing, tFirst, tLast);
     return res;
 }
 
