@@ -412,8 +412,8 @@ fn find_agent_tools_script(app: &AppHandle) -> Option<PathBuf> {
 }
 
 /// 收集所有可用的 node 可执行文件候选（去重、存在性校验）。
-/// `where node` 可能返回多个（Volta/nvm shim、官方安装等），个别版本可能带
-/// 启动期 bug，因此逐个尝试而非只取第一个。
+/// Windows 用 `where node`（可能返回多个：Volta/nvm shim、官方安装等），
+/// Linux/macOS 遍历 PATH；个别版本可能带启动期 bug，因此逐个尝试而非只取第一个。
 fn find_node_candidates() -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     {
@@ -426,6 +426,7 @@ fn find_node_candidates() -> Vec<String> {
         if let Ok(p) = std::env::var("QS_NODE_PATH") {
             push(&p);
         }
+        #[cfg(windows)]
         for name in ["node", "node.exe"] {
             if let Ok(o) = std::process::Command::new("where")
                 .arg(name)
@@ -435,6 +436,18 @@ fn find_node_candidates() -> Vec<String> {
                 if o.status.success() {
                     for line in String::from_utf8_lossy(&o.stdout).lines() {
                         push(line);
+                    }
+                }
+            }
+        }
+        // 非 Windows 无 where 命令：遍历 PATH 查找 node（保持 PATH 优先级顺序）
+        #[cfg(not(windows))]
+        {
+            if let Some(paths) = std::env::var_os("PATH") {
+                for dir in std::env::split_paths(&paths) {
+                    let p = dir.join("node");
+                    if p.is_file() {
+                        push(&p.to_string_lossy());
                     }
                 }
             }
@@ -488,7 +501,7 @@ async fn node_tool(app: AppHandle, workspace: String, name: String, args: Value)
         }
     }
     if candidates.is_empty() {
-        return Err("未找到 Node.js。请安装 Node.js（https://nodejs.org）或设置环境变量 QS_NODE_PATH 指向 node.exe".to_string());
+        return Err("未找到 Node.js。请安装 Node.js（https://nodejs.org）或设置环境变量 QS_NODE_PATH 指向 node 可执行文件".to_string());
     }
 
     let id = REQ_SEQ.fetch_add(1, Ordering::Relaxed);

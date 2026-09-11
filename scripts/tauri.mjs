@@ -1,5 +1,5 @@
-// tauri CLI 包装：自动注入 MSVC + Windows SDK（xwin）构建环境后再调用 tauri
-// 使 `npm run tauri dev/build` 在任意终端（Git Bash / PowerShell / CMD）直接可用
+// tauri CLI 包装：Windows 下自动注入 MSVC + Windows SDK（xwin）构建环境后再调用 tauri，
+// Linux/macOS 直接透传；使 `npm run tauri dev/build` 在任意终端直接可用
 import { spawn, spawnSync } from 'node:child_process';
 import { existsSync, readdirSync } from 'node:fs';
 import { delimiter, join } from 'node:path';
@@ -29,31 +29,34 @@ function findMsvcDir() {
     return candidates.find(d => existsSync(join(d, 'bin', 'Hostx64', 'x64', 'link.exe')));
 }
 
-const msvc = findMsvcDir();
 const env = { ...process.env };
 
-if (msvc) {
-    // 已有 INCLUDE/LIB（如 VS 开发者命令行已初始化）则不覆盖
-    if (!env.INCLUDE) {
-        env.INCLUDE = [
-            join(msvc, 'include'),
-            `${XWIN}\\sdk\\include\\ucrt`,
-            `${XWIN}\\sdk\\include\\um`,
-            `${XWIN}\\sdk\\include\\shared`,
-        ].join(';');
+// MSVC + Windows SDK 注入仅 Windows 主机需要（Linux/macOS 直接用系统工具链）
+if (process.platform === 'win32') {
+    const msvc = findMsvcDir();
+    if (msvc) {
+        // 已有 INCLUDE/LIB（如 VS 开发者命令行已初始化）则不覆盖
+        if (!env.INCLUDE) {
+            env.INCLUDE = [
+                join(msvc, 'include'),
+                `${XWIN}\\sdk\\include\\ucrt`,
+                `${XWIN}\\sdk\\include\\um`,
+                `${XWIN}\\sdk\\include\\shared`,
+            ].join(';');
+        }
+        if (!env.LIB) {
+            env.LIB = [
+                join(msvc, 'lib', 'x64'),
+                `${XWIN}\\sdk\\lib\\ucrt\\x86_64`,
+                `${XWIN}\\sdk\\lib\\um\\x86_64`,
+            ].join(';');
+        }
+        if (existsSync(SDK_TOOLS)) env.RC = `${SDK_TOOLS}\\rc.exe`;
+        // MSVC 与 rc.exe 前置到 PATH（抢占 Git Bash 的 GNU link）
+        env.PATH = [join(msvc, 'bin', 'Hostx64', 'x64'), existsSync(SDK_TOOLS) ? SDK_TOOLS : null, env.PATH].filter(Boolean).join(delimiter);
+    } else if (!env.INCLUDE) {
+        console.warn('[tauri.mjs] 未找到 MSVC 工具链，且环境无 INCLUDE —— 若编译报链接错误，请检查 VS C++ 生成工具');
     }
-    if (!env.LIB) {
-        env.LIB = [
-            join(msvc, 'lib', 'x64'),
-            `${XWIN}\\sdk\\lib\\ucrt\\x86_64`,
-            `${XWIN}\\sdk\\lib\\um\\x86_64`,
-        ].join(';');
-    }
-    if (existsSync(SDK_TOOLS)) env.RC = `${SDK_TOOLS}\\rc.exe`;
-    // MSVC 与 rc.exe 前置到 PATH（抢占 Git Bash 的 GNU link）
-    env.PATH = [join(msvc, 'bin', 'Hostx64', 'x64'), existsSync(SDK_TOOLS) ? SDK_TOOLS : null, env.PATH].filter(Boolean).join(delimiter);
-} else if (!env.INCLUDE) {
-    console.warn('[tauri.mjs] 未找到 MSVC 工具链，且环境无 INCLUDE —— 若编译报链接错误，请检查 VS C++ 生成工具');
 }
 
 const bin = join(root, 'node_modules', '.bin', process.platform === 'win32' ? 'tauri.cmd' : 'tauri');

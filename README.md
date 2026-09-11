@@ -39,9 +39,14 @@ pnpm dev              # 浏览器打开 http://localhost:4000
 ## 打包
 
 ```bash
-npm run tauri build   # 产出 NSIS 安装包（src-tauri/target/release/bundle/nsis/）
+npm run tauri build   # Windows: NSIS 安装包（src-tauri/target/release/bundle/nsis/）
+                      # Linux:   deb / rpm / AppImage（src-tauri/target/release/bundle/{deb,rpm,appimage}/）
 ```
 
+打包目标按平台在配置中分流：`tauri.conf.json` 配置 Windows（`nsis`），`tauri.linux.conf.json` 配置 Linux（`deb` / `rpm` / `appimage`），Tauri 构建时自动合并当前平台配置，无需额外参数。
+
+> Linux 打包需要系统依赖（如在 Ubuntu/Debian 上：`libwebkit2gtk-4.1-dev`、`libappindicator3-dev`、`librsvg2-dev`、`patchelf`），详见 [Tauri 官方文档](https://v2.tauri.app/start/prerequisites/)。
+>
 > Windows 打包需要 MSVC + Windows SDK。本机未安装 SDK 组件，已用 [xwin](https://github.com/Jake-Shadle/xwin) 免提权准备（SDK 解包在 `C:\Users\ja\xwin`，rc.exe 在 `C:\Users\ja\sdk-tools`），`scripts/tauri.mjs` 与 `scripts/msvc-env.sh` 会自动引用；换机器时需重新准备（见下）：
 >
 > ```bash
