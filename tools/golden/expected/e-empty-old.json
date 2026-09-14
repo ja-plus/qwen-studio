@@ -1,0 +1,6 @@
+{
+  "tool": "edit",
+  "assert": "exact",
+  "ok": false,
+  "text": "oldString 不能为空"
+}

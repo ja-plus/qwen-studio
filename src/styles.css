@@ -1840,3 +1840,92 @@ body {
     background: transparent !important;
     --stk-table-border-color: transparent;
 }
+
+/* ---------- 左侧列表的会话状态：运行中转圈 / 完成未读打勾 ---------- */
+.conv-row .c-status {
+    width: 13px;
+    flex-shrink: 0;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+}
+
+/* 复用全局 .spinner，缩到适合列表的尺寸 */
+.c-spin {
+    width: 10px;
+    height: 10px;
+    border-width: 1.5px;
+    vertical-align: 0;
+    flex-shrink: 0;
+}
+
+.c-tick {
+    color: var(--green);
+    font-size: 11px;
+    font-weight: 700;
+    line-height: 1;
+    flex-shrink: 0;
+}
+
+.c-tick em {
+    font-style: normal;
+    font-size: 10px;
+    color: var(--text-faint);
+}
+
+/* 完成未读：标题提亮加粗，扫一眼就知道哪条有新结果 */
+.conv-row.unread .c-title {
+    color: var(--text);
+    font-weight: 600;
+}
+
+.conv-row.unread:not(.active) {
+    background: rgba(52, 178, 123, 0.08);
+}
+
+.conv-row.running:not(.active) {
+    background: rgba(216, 160, 61, 0.08);
+}
+
+/* ---------- 设置：通用偏好（会话完成提醒） ---------- */
+.settings-general {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 10px 22px;
+    margin-top: 16px;
+    padding-top: 14px;
+    border-top: 1px solid var(--border);
+    font-size: 12.5px;
+    color: var(--text-dim);
+}
+
+.settings-general .g-text {
+    font-size: 12.5px;
+    color: var(--text-dim);
+}
+
+.settings-general .g-hint {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    color: var(--text-faint);
+    font-size: 12px;
+}
+
+.settings-general .g-hint.err {
+    color: var(--red);
+}
+
+.settings-general .btn.small {
+    margin-left: 4px;
+}
+
+/* ---------- 消息头的缓存命中徽章（前缀只增不改的直观反馈） ---------- */
+.cache-badge {
+    font-size: 10.5px;
+    color: var(--text-faint);
+    font-family: var(--font-mono);
+    white-space: nowrap;
+    cursor: default;
+}

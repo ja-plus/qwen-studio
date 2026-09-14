@@ -1,0 +1,6 @@
+{
+  "tool": "list",
+  "assert": "error",
+  "ok": false,
+  "text": "读取目录失败：ENOENT: no such file or directory, scandir '/tmp/qs-golden-2OstWF/work/repo/nope'"
+}

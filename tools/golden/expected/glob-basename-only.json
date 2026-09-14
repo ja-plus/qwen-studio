@@ -1,0 +1,6 @@
+{
+  "tool": "glob",
+  "assert": "exact",
+  "ok": true,
+  "text": "src/util/deep/nested.ts"
+}

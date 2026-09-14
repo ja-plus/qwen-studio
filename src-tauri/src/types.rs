@@ -38,4 +38,9 @@ pub(crate) struct CmdOutput {
 pub(crate) struct Frag {
     pub(crate) out: bool,
     pub(crate) completion_tokens: Option<u64>,
+    /// 输入侧用量（缓存命中率可观测性的来源）：总输入 token、命中前缀缓存的 token、本次新建缓存的 token。
+    /// 各协议字段名不同，统一在 `input_usage_of` 里折算成这三个口径。
+    pub(crate) prompt_tokens: Option<u64>,
+    pub(crate) cached_tokens: Option<u64>,
+    pub(crate) cache_write_tokens: Option<u64>,
 }

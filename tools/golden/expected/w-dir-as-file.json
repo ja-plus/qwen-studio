@@ -1,0 +1,6 @@
+{
+  "tool": "write",
+  "assert": "error",
+  "ok": false,
+  "text": "EISDIR: illegal operation on a directory, open '/tmp/qs-golden-2OstWF/work/repo/src'"
+}

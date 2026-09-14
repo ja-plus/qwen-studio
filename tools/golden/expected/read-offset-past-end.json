@@ -1,0 +1,6 @@
+{
+  "tool": "read",
+  "assert": "exact",
+  "ok": true,
+  "text": "a.txt（共 4 行，显示 999-4）\n"
+}

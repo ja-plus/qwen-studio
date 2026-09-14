@@ -1,0 +1,6 @@
+{
+  "tool": "list",
+  "assert": "exact",
+  "ok": true,
+  "text": "d      60 B  docs\nd     100 B  many\nd     100 B  src\n-      29 B  a.txt\n-      31 B  b.md\n-       7 B  bin.dat\n-      13 B  blank.txt\n-     231 B  c.txt\n-       0 B  dangling.md\n-       0 B  empty.txt\n-       6 B  gz.dat\n-      29 B  link-in.txt\n-      34 B  link-out.txt\n-  752.0 KB  long.txt"
+}

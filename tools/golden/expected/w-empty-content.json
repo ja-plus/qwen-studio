@@ -1,0 +1,9 @@
+{
+  "tool": "write",
+  "assert": "exact",
+  "ok": true,
+  "text": "已写入 empty2.txt（0 字符，1 行）",
+  "files": {
+    "empty2.txt": ""
+  }
+}

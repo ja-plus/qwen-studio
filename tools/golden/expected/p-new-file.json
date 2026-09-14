@@ -1,0 +1,9 @@
+{
+  "tool": "patch",
+  "assert": "exact",
+  "ok": true,
+  "text": "已应用补丁 src/brand/new.ts（1 个 hunk，新建）",
+  "files": {
+    "src/brand/new.ts": "export const created = true;\n// by patch"
+  }
+}

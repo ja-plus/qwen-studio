@@ -1,0 +1,6 @@
+{
+  "tool": "grep",
+  "assert": "exact",
+  "ok": true,
+  "text": "src/app.js:2:// TODO: fix me\nsrc/util/deep/nested.ts:2:// TODO nested"
+}

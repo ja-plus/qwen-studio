@@ -1,0 +1,6 @@
+{
+  "tool": "glob",
+  "assert": "exact",
+  "ok": true,
+  "text": "没有匹配 *.nope 的文件"
+}

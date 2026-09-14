@@ -1,0 +1,6 @@
+{
+  "tool": "read",
+  "assert": "exact",
+  "ok": true,
+  "text": "c.txt（共 31 行，显示 1-31）\n     1\tline 1\n     2\tline 2\n     3\tline 3\n     4\tline 4\n     5\tline 5\n     6\tline 6\n     7\tline 7\n     8\tline 8\n     9\tline 9\n    10\tline 10\n    11\tline 11\n    12\tline 12\n    13\tline 13\n    14\tline 14\n    15\tline 15\n    16\tline 16\n    17\tline 17\n    18\tline 18\n    19\tline 19\n    20\tline 20\n    21\tline 21\n    22\tline 22\n    23\tline 23\n    24\tline 24\n    25\tline 25\n    26\tline 26\n    27\tline 27\n    28\tline 28\n    29\tline 29\n    30\tline 30\n    31\t"
+}

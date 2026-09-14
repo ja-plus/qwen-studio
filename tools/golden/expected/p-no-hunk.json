@@ -1,0 +1,6 @@
+{
+  "tool": "patch",
+  "assert": "exact",
+  "ok": false,
+  "text": "未解析到有效的 @@ hunk，请提供标准 unified diff"
+}

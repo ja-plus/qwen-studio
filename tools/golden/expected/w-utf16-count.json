@@ -1,0 +1,9 @@
+{
+  "tool": "write",
+  "assert": "exact",
+  "ok": true,
+  "text": "已写入 e.txt（14 字符，2 行）",
+  "files": {
+    "e.txt": "😀😀😀 中文 abc\n"
+  }
+}

@@ -1,0 +1,6 @@
+{
+  "tool": "todowrite",
+  "assert": "exact",
+  "ok": true,
+  "text": "任务清单（0/2 完成）\n○ 😀 未知状态\n○ undefined"
+}

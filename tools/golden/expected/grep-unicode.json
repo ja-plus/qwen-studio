@@ -1,0 +1,6 @@
+{
+  "tool": "grep",
+  "assert": "exact",
+  "ok": true,
+  "text": "docs/文档.txt:1:中文文件名 first"
+}

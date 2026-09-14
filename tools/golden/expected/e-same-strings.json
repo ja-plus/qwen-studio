@@ -1,0 +1,9 @@
+{
+  "tool": "edit",
+  "assert": "exact",
+  "ok": true,
+  "text": "已修改 a.txt：替换 1 行 → 1 行",
+  "files": {
+    "a.txt": "alpha line\nsecond line\nTHIRD\n"
+  }
+}

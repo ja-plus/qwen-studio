@@ -1,0 +1,6 @@
+{
+  "tool": "read",
+  "assert": "exact",
+  "ok": false,
+  "text": "只允许使用相对工作目录的路径"
+}

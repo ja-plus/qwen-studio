@@ -1,0 +1,6 @@
+{
+  "tool": "read",
+  "assert": "exact",
+  "ok": true,
+  "text": "b.md（共 4 行，显示 1-4）\n     1\t# B\r\n     2\tCR LF 混合\r\n     3\tline alpha\r\n     4\t"
+}

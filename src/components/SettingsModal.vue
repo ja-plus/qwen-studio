@@ -1,6 +1,7 @@
 <script setup>
 import { ref, computed } from 'vue';
 import { store, flushPersist } from '../lib/chat.js';
+import { notifyTest, setFlag, notifyState } from '../lib/notify.js';
 import {
     modelState, persistModelState, refreshQwenModels, prettifyModelId,
     PROTOCOLS, QWEN_PROVIDER_ID, DEFAULT_MODEL,
@@ -25,6 +26,19 @@ const fetchedText = computed(() => {
     return `上次拉取：${new Date(cur.value.fetchedAt).toLocaleString()}`;
 });
 
+// ---------- 通用偏好：会话完成提醒 ----------
+function saveNotifyFlags() {
+    setFlag('qs.notify', store.notifyDone);
+    setFlag('qs.notifyWake', store.notifyWake);
+}
+
+const permissionText = computed(() => ({
+    granted: '已授权',
+    denied: '被系统拒绝（去系统设置里允许 Qwen Studio 通知）',
+    unsupported: '当前环境不支持（浏览器预览模式）',
+    unknown: store.notifyDone ? '首次发送时申请' : '已关闭',
+}[notifyState.permission] || notifyState.permission));
+
 function pick(id) {
     currentId.value = id;
     showKey.value = false;
@@ -34,7 +48,7 @@ function pick(id) {
 function addProvider() {
     const id = `p_${Date.now().toString(36)}`;
     working.value.push({
-        id, name: '', baseUrl: '', apiKey: '', protocol: 'chat',
+        id, name: '', baseUrl: '', apiKey: '', protocol: 'chat', contextWindow: 0,
         models: [], fetchedAt: 0,
     });
     pick(id);
@@ -121,7 +135,7 @@ function save() {
 <template>
     <div class="modal-mask" @click.self="emit('close')">
         <div class="modal settings-modal">
-            <h3>⚙ 设置 · 模型供应商</h3>
+            <h3>⚙ 设置</h3>
             <div class="settings-body">
                 <aside class="settings-nav">
                     <div class="nav-group-label">内置</div>
@@ -163,6 +177,12 @@ function save() {
                         </select>
                     </div>
                     <div class="field">
+                        <label>上下文窗口</label>
+                        <input v-model.number="cur.contextWindow" class="input" type="number" :min="0" step="1024"
+                            placeholder="选填，如 262144" />
+                        <div class="tip">填了才按模型窗口换算历史预算（窗口的一半，上下限 8k~64k）；留空按保守的 24k 处理。</div>
+                    </div>
+                    <div class="field">
                         <label>模型列表</label>
                         <div class="model-chips">
                             <span v-for="m in cur.models" :key="m" class="model-chip" :title="m">
@@ -196,6 +216,25 @@ function save() {
                         <button class="btn primary" :disabled="!canSave" @click="save">保存</button>
                     </div>
                 </section>
+            </div>
+
+            <!-- 通用偏好：不属于任何单个供应商 -->
+            <div class="settings-general">
+                <label class="switch" title="回复完成后发一条系统通知，点通知即可跳回那条会话">
+                    <input v-model="store.notifyDone" type="checkbox" @change="saveNotifyFlags" />
+                    <span class="track"></span>
+                    <span class="g-text">会话回复完成时发系统通知</span>
+                </label>
+                <label class="switch" title="窗口被最小化或隐藏时，顺便把它带回前台（会抢焦点，谨慎开）">
+                    <input v-model="store.notifyWake" type="checkbox" @change="saveNotifyFlags" />
+                    <span class="track"></span>
+                    <span class="g-text">发通知时唤醒窗口</span>
+                </label>
+                <span class="g-hint">
+                    通知权限：{{ permissionText }}
+                    <button class="btn small" @click="notifyTest()">发送测试通知</button>
+                </span>
+                <span v-if="notifyState.lastError" class="g-hint err">{{ notifyState.lastError }}</span>
             </div>
         </div>
     </div>

@@ -1,0 +1,856 @@
+{
+    "desc": "Agent 工具输出契约的 golden 语料。expected/ 由 `node tools/golden/record.mjs` 从 Node 运行时录制；Rust 侧 src-tauri/src/tools/golden.rs 复刻同一 fixture 并逐字节对照。见 RUST-TOOLS-MIGRATION.md。",
+    "workspace": "repo",
+    "files": {
+        "outside.txt": "外面的文件，不该被读到\n",
+        "repo/a.txt": "alpha line\nsecond line\nTHIRD\n",
+        "repo/b.md": "# B\r\nCR LF 混合\r\nline alpha\r\n",
+        "repo/empty.txt": "",
+        "repo/long.txt": {
+            "repeat": [
+                "0123456789 ",
+                70000
+            ]
+        },
+        "repo/bin.dat": {
+            "bytes": [
+                37,
+                33,
+                0,
+                1,
+                2,
+                255,
+                254
+            ]
+        },
+        "repo/gz.dat": {
+            "bytes": [
+                31,
+                139,
+                8,
+                0,
+                0,
+                0
+            ]
+        },
+        "repo/c.txt": {
+            "linesOf": [
+                "line",
+                30
+            ]
+        },
+        "repo/many/1.txt": "one\n",
+        "repo/many/2.txt": "two\n",
+        "repo/many/3.txt": "three\n",
+        "repo/src/app.js": "export const x = 1;\n// TODO: fix me\nconst y = x + 1;\n",
+        "repo/src/util/deep/nested.ts": "export const y = 2;\n// TODO nested\n",
+        "repo/src/index.vue": "<template>\n<div>hi</div>\n</template>\n",
+        "repo/docs/文档.txt": "中文文件名 first\nsecond 行 alpha\n",
+        "repo/node_modules/pkg/i.js": "alpha in node_modules\n",
+        "repo/.hidden/x.txt": "dot dir content alpha\n",
+        "repo/link-out.txt": {
+            "symlink": "../outside.txt",
+            "requiresSymlink": true
+        },
+        "repo/link-in.txt": {
+            "symlink": "a.txt",
+            "requiresSymlink": true
+        },
+        "repo/.agents/skills/release/SKILL.md": "---\nname: release\ndescription: 发布流程\n---\n\n# 发布\n第一步：跑测试。\n",
+        "repo/.agents/skills/flat.md": "---\nname: flat\ndescription: 平铺技能\n---\n正文\n",
+        "repo/.agents/skills/huge/SKILL.md": {
+            "repeat": [
+                "abcdefg\n",
+                9600
+            ]
+        },
+        "repo/dangling.md": {
+            "symlink": "./not-exist.md",
+            "requiresSymlink": true
+        },
+        "repo/blank.txt": "first\n\nthird\n"
+    },
+    "cases": [
+        {
+            "id": "list-root",
+            "tool": "list",
+            "args": {}
+        },
+        {
+            "id": "list-root-all",
+            "tool": "list",
+            "args": {
+                "all": true
+            }
+        },
+        {
+            "id": "list-src",
+            "tool": "list",
+            "args": {
+                "path": "src"
+            }
+        },
+        {
+            "id": "list-docs-cjk",
+            "tool": "list",
+            "args": {
+                "path": "docs"
+            }
+        },
+        {
+            "id": "list-dot-dir",
+            "tool": "list",
+            "args": {
+                "path": ".hidden"
+            }
+        },
+        {
+            "id": "list-missing-dir",
+            "tool": "list",
+            "args": {
+                "path": "nope"
+            },
+            "assert": "error"
+        },
+        {
+            "id": "list-file-as-dir",
+            "tool": "list",
+            "args": {
+                "path": "a.txt"
+            },
+            "assert": "error"
+        },
+        {
+            "id": "read-a",
+            "tool": "read",
+            "args": {
+                "filePath": "a.txt"
+            }
+        },
+        {
+            "id": "read-crlf",
+            "tool": "read",
+            "args": {
+                "filePath": "b.md"
+            }
+        },
+        {
+            "id": "read-empty",
+            "tool": "read",
+            "args": {
+                "filePath": "empty.txt"
+            }
+        },
+        {
+            "id": "read-offset-limit",
+            "tool": "read",
+            "args": {
+                "filePath": "c.txt",
+                "offset": 28,
+                "limit": 5
+            }
+        },
+        {
+            "id": "read-default-limit",
+            "tool": "read",
+            "args": {
+                "filePath": "c.txt"
+            }
+        },
+        {
+            "id": "read-limit-clamped",
+            "tool": "read",
+            "args": {
+                "filePath": "a.txt",
+                "limit": 99999
+            }
+        },
+        {
+            "id": "read-offset-past-end",
+            "tool": "read",
+            "args": {
+                "filePath": "a.txt",
+                "offset": 999
+            }
+        },
+        {
+            "id": "read-gzip",
+            "tool": "read",
+            "args": {
+                "filePath": "gz.dat"
+            }
+        },
+        {
+            "id": "read-binary",
+            "tool": "read",
+            "args": {
+                "filePath": "bin.dat"
+            }
+        },
+        {
+            "id": "read-too-large",
+            "tool": "read",
+            "args": {
+                "filePath": "long.txt"
+            }
+        },
+        {
+            "id": "read-absolute",
+            "tool": "read",
+            "args": {
+                "filePath": "/etc/passwd"
+            }
+        },
+        {
+            "id": "read-dotdot",
+            "tool": "read",
+            "args": {
+                "filePath": "../outside.txt"
+            }
+        },
+        {
+            "id": "read-symlink-in",
+            "tool": "read",
+            "args": {
+                "filePath": "link-in.txt"
+            },
+            "requiresSymlink": true
+        },
+        {
+            "id": "read-symlink-escape",
+            "tool": "read",
+            "args": {
+                "filePath": "link-out.txt"
+            },
+            "requiresSymlink": true
+        },
+        {
+            "id": "read-dir",
+            "tool": "read",
+            "args": {
+                "filePath": "src"
+            },
+            "assert": "error"
+        },
+        {
+            "id": "read-missing",
+            "tool": "read",
+            "args": {
+                "filePath": "nope.txt"
+            },
+            "assert": "error"
+        },
+        {
+            "id": "glob-src-ts",
+            "tool": "glob",
+            "args": {
+                "pattern": "src/**/*.ts"
+            }
+        },
+        {
+            "id": "glob-vue",
+            "tool": "glob",
+            "args": {
+                "pattern": "**/*.vue"
+            }
+        },
+        {
+            "id": "glob-brace",
+            "tool": "glob",
+            "args": {
+                "pattern": "{a,b,empty}.*"
+            }
+        },
+        {
+            "id": "glob-question",
+            "tool": "glob",
+            "args": {
+                "pattern": "src/i?dex.vue"
+            }
+        },
+        {
+            "id": "glob-case-insensitive",
+            "tool": "glob",
+            "args": {
+                "pattern": "SRC/*.JS"
+            }
+        },
+        {
+            "id": "glob-basename-only",
+            "tool": "glob",
+            "args": {
+                "pattern": "nested.ts"
+            }
+        },
+        {
+            "id": "glob-none",
+            "tool": "glob",
+            "args": {
+                "pattern": "*.nope"
+            }
+        },
+        {
+            "id": "glob-all-flag",
+            "tool": "glob",
+            "args": {
+                "pattern": "**/*.js",
+                "all": true
+            }
+        },
+        {
+            "id": "grep-todo",
+            "tool": "grep",
+            "args": {
+                "pattern": "TODO"
+            }
+        },
+        {
+            "id": "grep-alpha",
+            "tool": "grep",
+            "args": {
+                "pattern": "alpha"
+            }
+        },
+        {
+            "id": "grep-ignore-case",
+            "tool": "grep",
+            "args": {
+                "pattern": "ALPHA",
+                "ignoreCase": true
+            }
+        },
+        {
+            "id": "grep-include-ts",
+            "tool": "grep",
+            "args": {
+                "pattern": "const",
+                "include": "*.ts"
+            }
+        },
+        {
+            "id": "grep-subdir",
+            "tool": "grep",
+            "args": {
+                "pattern": "export",
+                "path": "src/util"
+            }
+        },
+        {
+            "id": "grep-single-file",
+            "tool": "grep",
+            "args": {
+                "pattern": "line",
+                "path": "b.md"
+            }
+        },
+        {
+            "id": "grep-crlf",
+            "tool": "grep",
+            "args": {
+                "pattern": "CR LF"
+            }
+        },
+        {
+            "id": "grep-unicode",
+            "tool": "grep",
+            "args": {
+                "pattern": "中文"
+            }
+        },
+        {
+            "id": "grep-classes",
+            "tool": "grep",
+            "args": {
+                "pattern": "\\w+\\s+line"
+            }
+        },
+        {
+            "id": "grep-anchor",
+            "tool": "grep",
+            "args": {
+                "pattern": "^#",
+                "path": "b.md"
+            }
+        },
+        {
+            "id": "grep-none",
+            "tool": "grep",
+            "args": {
+                "pattern": "zzz-不存在-xyz"
+            }
+        },
+        {
+            "id": "grep-empty-pattern",
+            "tool": "grep",
+            "args": {
+                "pattern": ""
+            }
+        },
+        {
+            "id": "grep-lookahead",
+            "tool": "grep",
+            "args": {
+                "pattern": "(?=alpha)\\w+"
+            }
+        },
+        {
+            "id": "w-new-nested",
+            "tool": "write",
+            "args": {
+                "filePath": "pkg/deep/new.ts",
+                "content": "export const a = 1;\n"
+            },
+            "inspect": [
+                "pkg/deep/new.ts"
+            ]
+        },
+        {
+            "id": "w-overwrite",
+            "tool": "write",
+            "args": {
+                "filePath": "a.txt",
+                "content": "重写\n第二行\n"
+            },
+            "inspect": [
+                "a.txt",
+                "b.md"
+            ]
+        },
+        {
+            "id": "w-empty-content",
+            "tool": "write",
+            "args": {
+                "filePath": "empty2.txt",
+                "content": ""
+            },
+            "inspect": [
+                "empty2.txt"
+            ]
+        },
+        {
+            "id": "w-utf16-count",
+            "tool": "write",
+            "args": {
+                "filePath": "e.txt",
+                "content": "😀😀😀 中文 abc\n"
+            },
+            "inspect": [
+                "e.txt"
+            ]
+        },
+        {
+            "id": "w-no-content-arg",
+            "tool": "write",
+            "args": {
+                "filePath": "n.txt"
+            },
+            "inspect": [
+                "n.txt"
+            ]
+        },
+        {
+            "id": "w-absolute",
+            "tool": "write",
+            "args": {
+                "filePath": "/tmp/qs-x.txt",
+                "content": "x"
+            }
+        },
+        {
+            "id": "w-dotdot",
+            "tool": "write",
+            "args": {
+                "filePath": "../qs-out.txt",
+                "content": "x"
+            }
+        },
+        {
+            "id": "w-dangling-link",
+            "tool": "write",
+            "args": {
+                "filePath": "dangling.md",
+                "content": "x"
+            },
+            "requiresSymlink": true
+        },
+        {
+            "id": "w-escape-link",
+            "tool": "write",
+            "args": {
+                "filePath": "link-out.txt",
+                "content": "x"
+            },
+            "requiresSymlink": true
+        },
+        {
+            "id": "w-dir-as-file",
+            "tool": "write",
+            "args": {
+                "filePath": "src",
+                "content": "x"
+            },
+            "assert": "error"
+        },
+        {
+            "id": "e-basic",
+            "tool": "edit",
+            "args": {
+                "filePath": "a.txt",
+                "oldString": "second line",
+                "newString": "SECOND line"
+            },
+            "inspect": [
+                "a.txt"
+            ]
+        },
+        {
+            "id": "e-not-found",
+            "tool": "edit",
+            "args": {
+                "filePath": "a.txt",
+                "oldString": "nope",
+                "newString": "x"
+            }
+        },
+        {
+            "id": "e-duplicate",
+            "tool": "edit",
+            "args": {
+                "filePath": "c.txt",
+                "oldString": "line",
+                "newString": "LINE"
+            }
+        },
+        {
+            "id": "e-empty-old",
+            "tool": "edit",
+            "args": {
+                "filePath": "a.txt",
+                "oldString": "",
+                "newString": "x"
+            }
+        },
+        {
+            "id": "e-crlf",
+            "tool": "edit",
+            "args": {
+                "filePath": "b.md",
+                "oldString": "# B\r\nCR LF 混合",
+                "newString": "# B changed\r\nCR LF 混合\r\n插一行"
+            },
+            "inspect": [
+                "b.md"
+            ]
+        },
+        {
+            "id": "e-multiline",
+            "tool": "edit",
+            "args": {
+                "filePath": "c.txt",
+                "oldString": "line 1\nline 2",
+                "newString": "a\nb\nc"
+            },
+            "inspect": [
+                "c.txt"
+            ]
+        },
+        {
+            "id": "e-same-strings",
+            "tool": "edit",
+            "args": {
+                "filePath": "a.txt",
+                "oldString": "THIRD",
+                "newString": "THIRD"
+            },
+            "inspect": [
+                "a.txt"
+            ]
+        },
+        {
+            "id": "e-missing-file",
+            "tool": "edit",
+            "args": {
+                "filePath": "nope.txt",
+                "oldString": "a",
+                "newString": "b"
+            },
+            "assert": "error"
+        },
+        {
+            "id": "e-binary",
+            "tool": "edit",
+            "args": {
+                "filePath": "bin.dat",
+                "oldString": "a",
+                "newString": "b"
+            }
+        },
+        {
+            "id": "e-too-large",
+            "tool": "edit",
+            "args": {
+                "filePath": "long.txt",
+                "oldString": "a",
+                "newString": "b"
+            }
+        },
+        {
+            "id": "p-basic",
+            "tool": "patch",
+            "args": {
+                "filePath": "c.txt",
+                "diff": "--- a/c.txt\n+++ b/c.txt\n@@ -2,3 +2,3 @@\n line 2\n-line 3\n+LINE 3 changed\n line 4\n"
+            },
+            "inspect": [
+                "c.txt"
+            ]
+        },
+        {
+            "id": "p-new-file",
+            "tool": "patch",
+            "args": {
+                "filePath": "src/brand/new.ts",
+                "diff": "--- /dev/null\n+++ b/src/brand/new.ts\n@@ -0,0 +1,2 @@\n+export const created = true;\n+// by patch\n"
+            },
+            "inspect": [
+                "src/brand/new.ts"
+            ]
+        },
+        {
+            "id": "p-negative-context",
+            "tool": "patch",
+            "args": {
+                "filePath": "c.txt",
+                "diff": "--- a/c.txt\n+++ b/c.txt\n@@ -3,4 +3,3 @@\n-line 2\n line 3\n line 4\n"
+            },
+            "inspect": [
+                "c.txt"
+            ]
+        },
+        {
+            "id": "p-multihunk",
+            "tool": "patch",
+            "args": {
+                "filePath": "c.txt",
+                "diff": "--- a/c.txt\n+++ b/c.txt\n@@ -1,2 +1,2 @@\n-line 1\n+ONE\n line 2\n@@ -28,3 +28,2 @@\n line 28\n-line 29\n line 30\n"
+            },
+            "inspect": [
+                "c.txt"
+            ]
+        },
+        {
+            "id": "p-drift",
+            "tool": "patch",
+            "args": {
+                "filePath": "c.txt",
+                "diff": "--- a/c.txt\n+++ b/c.txt\n@@ -8,2 +8,2 @@\n line 12\n-line 13\n+THIRTEEN\n"
+            },
+            "inspect": [
+                "c.txt"
+            ]
+        },
+        {
+            "id": "p-empty-target",
+            "tool": "patch",
+            "args": {
+                "filePath": "empty.txt",
+                "diff": "--- /dev/null\n+++ b/empty.txt\n@@ -0,0 +1,1 @@\n+只有这一行\n"
+            },
+            "inspect": [
+                "empty.txt"
+            ]
+        },
+        {
+            "id": "p-crlf-target",
+            "tool": "patch",
+            "args": {
+                "filePath": "b.md",
+                "diff": "--- a/b.md\n+++ b/b.md\n@@ -1,3 +1,3 @@\n-# B\r\n+# B patched\r\n CR LF 混合\r\n"
+            },
+            "inspect": [
+                "b.md"
+            ]
+        },
+        {
+            "id": "p-no-hunk",
+            "tool": "patch",
+            "args": {
+                "filePath": "a.txt",
+                "diff": "--- a/a.txt\n+++ b/a.txt\n just some text\n"
+            }
+        },
+        {
+            "id": "p-bad-header",
+            "tool": "patch",
+            "args": {
+                "filePath": "a.txt",
+                "diff": "@@ 1,2 3,4 @@\n-a\n+b\n"
+            }
+        },
+        {
+            "id": "p-mismatch",
+            "tool": "patch",
+            "args": {
+                "filePath": "a.txt",
+                "diff": "--- a/a.txt\n+++ b/a.txt\n@@ -1,2 +1,2 @@\n-zzz\n-yyy\n+1\n+2\n"
+            }
+        },
+        {
+            "id": "td-full",
+            "tool": "todowrite",
+            "args": {
+                "todos": [
+                    {
+                        "content": "读代码",
+                        "status": "completed"
+                    },
+                    {
+                        "content": "改实现",
+                        "status": "active"
+                    },
+                    {
+                        "content": "补测试",
+                        "status": "pending"
+                    },
+                    {
+                        "content": "放弃这条",
+                        "status": "cancelled"
+                    }
+                ]
+            }
+        },
+        {
+            "id": "td-empty-array",
+            "tool": "todowrite",
+            "args": {
+                "todos": []
+            }
+        },
+        {
+            "id": "td-no-arg",
+            "tool": "todowrite",
+            "args": {}
+        },
+        {
+            "id": "td-odd",
+            "tool": "todowrite",
+            "args": {
+                "todos": [
+                    {
+                        "content": "😀 未知状态",
+                        "status": "wip"
+                    },
+                    {
+                        "status": "pending"
+                    }
+                ]
+            }
+        },
+        {
+            "id": "sk-dir",
+            "tool": "skill",
+            "args": {
+                "name": "release"
+            }
+        },
+        {
+            "id": "sk-flat",
+            "tool": "skill",
+            "args": {
+                "name": "flat"
+            }
+        },
+        {
+            "id": "sk-missing",
+            "tool": "skill",
+            "args": {
+                "name": "nope"
+            }
+        },
+        {
+            "id": "sk-bad-name",
+            "tool": "skill",
+            "args": {
+                "name": "a/b"
+            }
+        },
+        {
+            "id": "sk-back-name",
+            "tool": "skill",
+            "args": {
+                "name": "..\\x"
+            }
+        },
+        {
+            "id": "sk-huge",
+            "tool": "skill",
+            "args": {
+                "name": "huge"
+            }
+        },
+        {
+            "id": "p-add-only",
+            "tool": "patch",
+            "args": {
+                "filePath": "a.txt",
+                "diff": "--- a/a.txt\n+++ b/a.txt\n@@ -1,0 +2,1 @@\n+appended after line 1\n"
+            },
+            "inspect": [
+                "a.txt"
+            ]
+        },
+        {
+            "id": "p-del-only",
+            "tool": "patch",
+            "args": {
+                "filePath": "a.txt",
+                "diff": "--- a/a.txt\n+++ b/a.txt\n@@ -3,1 +2,0 @@\n-THIRD\n"
+            },
+            "inspect": [
+                "a.txt"
+            ]
+        },
+        {
+            "id": "p-blank-context",
+            "tool": "patch",
+            "args": {
+                "filePath": "blank.txt",
+                "diff": "--- a/blank.txt\n+++ b/blank.txt\n@@ -1,3 +1,4 @@\n first\n+second\n \n third\n"
+            },
+            "inspect": [
+                "blank.txt"
+            ]
+        },
+        {
+            "id": "p-no-trailing-nl",
+            "tool": "patch",
+            "args": {
+                "filePath": "c.txt",
+                "diff": "--- a/c.txt\n+++ b/c.txt\n@@ -1,2 +1,2 @@\n-line 1\n+ONE\n line 2"
+            },
+            "inspect": [
+                "c.txt"
+            ]
+        },
+        {
+            "id": "p-whole-file",
+            "tool": "patch",
+            "args": {
+                "filePath": "a.txt",
+                "diff": "--- a/a.txt\n+++ b/a.txt\n@@ -1,4 +1,2 @@\n-alpha line\n-second line\n-THIRD\n-\n+只剩两行\n+第二行\n"
+            },
+            "inspect": [
+                "a.txt"
+            ]
+        }
+    ],
+    "rustKnownGaps": {
+        "grep-lookahead": "JS RegExp 支持前瞻，Rust regex 不支持 —— 待语法转译或统一报错文案",
+        "list-missing-dir": "OS 错误文案不同（Node: ENOENT: ... scandir；Rust: os error 2），只比对失败位",
+        "list-file-as-dir": "同上，ENOTDIR 文案不同",
+        "read-dir": "错误文案里带绝对路径，只比对失败位",
+        "read-missing": "同上，ENOENT 文案不同",
+        "w-dir-as-file": "错误文案来自 OS（EISDIR vs 目录 syscall 文案），只比对失败位",
+        "e-missing-file": "同上，ENOENT 文案不同"
+    }
+}

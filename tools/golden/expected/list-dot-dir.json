@@ -1,0 +1,6 @@
+{
+  "tool": "list",
+  "assert": "exact",
+  "ok": true,
+  "text": "-      22 B  .hidden/x.txt"
+}

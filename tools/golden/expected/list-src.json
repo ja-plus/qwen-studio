@@ -1,0 +1,6 @@
+{
+  "tool": "list",
+  "assert": "exact",
+  "ok": true,
+  "text": "d      60 B  src/util\n-      53 B  src/app.js\n-      37 B  src/index.vue"
+}

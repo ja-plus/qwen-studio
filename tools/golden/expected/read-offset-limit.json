@@ -1,0 +1,6 @@
+{
+  "tool": "read",
+  "assert": "exact",
+  "ok": true,
+  "text": "c.txt（共 31 行，显示 28-31）\n    28\tline 28\n    29\tline 29\n    30\tline 30\n    31\t"
+}

@@ -1,0 +1,6 @@
+{
+  "tool": "patch",
+  "assert": "exact",
+  "ok": false,
+  "text": "补丁无法应用：第 1 行附近的内容与 diff 不匹配（文件可能已被修改，请先 read 最新内容）"
+}

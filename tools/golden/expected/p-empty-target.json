@@ -1,0 +1,9 @@
+{
+  "tool": "patch",
+  "assert": "exact",
+  "ok": true,
+  "text": "已应用补丁 empty.txt（1 个 hunk，新建）",
+  "files": {
+    "empty.txt": "只有这一行"
+  }
+}

@@ -1,0 +1,9 @@
+{
+  "tool": "patch",
+  "assert": "exact",
+  "ok": true,
+  "text": "已应用补丁 a.txt（1 个 hunk，修改）",
+  "files": {
+    "a.txt": "alpha line\nsecond line\n"
+  }
+}

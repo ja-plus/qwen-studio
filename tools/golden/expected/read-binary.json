@@ -1,0 +1,6 @@
+{
+  "tool": "read",
+  "assert": "exact",
+  "ok": false,
+  "text": "二进制文件，无法以文本读取"
+}

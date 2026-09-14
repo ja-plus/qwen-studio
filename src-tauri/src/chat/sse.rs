@@ -23,6 +23,10 @@ pub(super) async fn stream_sse(
     let mut first_out: Option<Instant> = None;
     let mut last_out: Option<Instant> = None;
     let mut tokens: Option<u64> = None;
+    // 输入侧用量：没有这组数字，前缀缓存的优化效果全靠猜
+    let mut prompt: Option<u64> = None;
+    let mut cached: Option<u64> = None;
+    let mut cache_write: Option<u64> = None;
     let mut chunks = 0u64;
     // 取消唤醒器：不能只在循环头查 CANCELLED，否则流停滞时要挂满读取超时才放手
     let notifier = cancel_notifier(rid);
@@ -81,6 +85,17 @@ pub(super) async fn stream_sse(
                     if let Some(t) = frag.completion_tokens {
                         tokens = Some(tokens.map_or(t, |p| p.max(t)));
                     }
+                    // 输入侧用量常常只在首/尾某一个分片出现（Anthropic 的 input_tokens 只在 message_start），
+                    // 其余分片压根不带 usage —— 取最大值的口径同样安全
+                    if let Some(p) = frag.prompt_tokens {
+                        prompt = Some(prompt.map_or(p, |v| v.max(p)));
+                    }
+                    if let Some(c) = frag.cached_tokens {
+                        cached = Some(cached.map_or(c, |v| v.max(c)));
+                    }
+                    if let Some(w) = frag.cache_write_tokens {
+                        cache_write = Some(cache_write.map_or(w, |v| v.max(w)));
+                    }
                 }
             }
         }
@@ -97,6 +112,9 @@ pub(super) async fn stream_sse(
             "decodeMs": first_out.map_or(0, |f| last_out.map_or(0, |l| ms(l - f))),
             "totalMs": ms(sent_at.elapsed()),
             "completionTokens": tokens,
+            "promptTokens": prompt,
+            "cachedTokens": cached,
+            "cacheWriteTokens": cache_write,
             "chunks": chunks,
         }),
     );
@@ -117,6 +135,10 @@ pub(super) fn handle_openai_sse(app: &AppHandle, rid: &str, data: &str) -> Frag 
         completion_tokens: v["usage"]["completion_tokens"].as_u64(),
         ..Default::default()
     };
+    let (prompt, cached, cache_write) = input_usage_of(&v["usage"]);
+    frag.prompt_tokens = prompt;
+    frag.cached_tokens = cached;
+    frag.cache_write_tokens = cache_write;
     let choice = &v["choices"][0];
     let delta = &choice["delta"];
     if let Some(c) = delta["content"].as_str() {
@@ -150,6 +172,31 @@ fn output_tokens_of(usage: &Value) -> Option<u64> {
         .or_else(|| usage["output_tokens"].as_u64())
 }
 
+/// 输入侧用量折算成统一口径 (总输入, 命中缓存, 新建缓存)。
+/// - OpenAI / DashScope：prompt_tokens 已含命中部分，cached_tokens 在 prompt_tokens_details 里
+/// - Responses：input_tokens + input_tokens_details.cached_tokens
+/// - Anthropic：input_tokens **不含**命中/新建缓存的部分，总输入要把两者加回去
+fn input_usage_of(usage: &Value) -> (Option<u64>, Option<u64>, Option<u64>) {
+    if usage.is_null() {
+        return (None, None, None);
+    }
+    let anthropic_read = usage["cache_read_input_tokens"].as_u64();
+    let read = anthropic_read
+        .or_else(|| usage["prompt_tokens_details"]["cached_tokens"].as_u64())
+        .or_else(|| usage["input_tokens_details"]["cached_tokens"].as_u64());
+    let write = usage["cache_creation_input_tokens"]
+        .as_u64()
+        .or_else(|| usage["prompt_tokens_details"]["cache_creation_input_tokens"].as_u64());
+    let raw = usage["prompt_tokens"].as_u64().or_else(|| usage["input_tokens"].as_u64());
+    let anthropic_style = usage["cache_read_input_tokens"].is_number()
+        || usage["cache_creation_input_tokens"].is_number();
+    let total = match raw {
+        Some(p) if anthropic_style => Some(p + read.unwrap_or(0) + write.unwrap_or(0)),
+        other => other,
+    };
+    (total, read, write)
+}
+
 /// Anthropic Messages SSE 分片 → 前端事件
 pub(super) fn handle_anthropic_sse(app: &AppHandle, rid: &str, data: &str) -> Frag {
     let Ok(v) = serde_json::from_str::<Value>(data) else {
@@ -160,6 +207,11 @@ pub(super) fn handle_anthropic_sse(app: &AppHandle, rid: &str, data: &str) -> Fr
         "message_start" => {
             // 起始用量只是个小初值，真正的累计值在 message_delta
             frag.completion_tokens = output_tokens_of(&v["message"]["usage"]);
+            // 输入侧用量（含缓存命中）只在这里给，message_delta 不再重复
+            let (prompt, cached, cache_write) = input_usage_of(&v["message"]["usage"]);
+            frag.prompt_tokens = prompt;
+            frag.cached_tokens = cached;
+            frag.cache_write_tokens = cache_write;
         }
         "content_block_start" => {
             let cb = &v["content_block"];
@@ -216,6 +268,10 @@ pub(super) fn handle_anthropic_sse(app: &AppHandle, rid: &str, data: &str) -> Fr
         }
         "message_delta" => {
             frag.completion_tokens = output_tokens_of(&v["usage"]);
+            let (prompt, cached, cache_write) = input_usage_of(&v["usage"]);
+            frag.prompt_tokens = prompt;
+            frag.cached_tokens = cached;
+            frag.cache_write_tokens = cache_write;
             if let Some(fr) = v["delta"]["stop_reason"].as_str() {
                 emit_chat(app, rid, "finish", json!(fr));
             }
@@ -285,6 +341,10 @@ pub(super) fn handle_responses_sse(app: &AppHandle, rid: &str, data: &str) -> Fr
         }
         "response.completed" => {
             frag.completion_tokens = output_tokens_of(&v["response"]["usage"]);
+            let (prompt, cached, cache_write) = input_usage_of(&v["response"]["usage"]);
+            frag.prompt_tokens = prompt;
+            frag.cached_tokens = cached;
+            frag.cache_write_tokens = cache_write;
             emit_chat(app, rid, "finish", json!("stop"));
         }
         "response.incomplete" => emit_chat(app, rid, "finish", json!("incomplete")),

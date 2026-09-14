@@ -1,0 +1,9 @@
+{
+  "tool": "edit",
+  "assert": "exact",
+  "ok": true,
+  "text": "已修改 b.md：替换 2 行 → 3 行",
+  "files": {
+    "b.md": "# B changed\r\nCR LF 混合\r\n插一行\r\nline alpha\r\n"
+  }
+}

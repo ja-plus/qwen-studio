@@ -1,0 +1,6 @@
+{
+  "tool": "read",
+  "assert": "error",
+  "ok": false,
+  "text": "这是一个目录：/tmp/qs-golden-2OstWF/work/repo/src"
+}

@@ -7,10 +7,11 @@
 - **多模型切换**：内置千问模型（qwen3.8-max / qwen3.7-plus / qwen3.7-flash）与三方模型（deepseek-v4-pro-0813 / deepseek-v4-flash-0731 / kimi-k3 / glm-5.3 / MiniMax-M3），选择器位于输入框右下角，支持自定义模型 ID
 - **上下文同步**：切换模型后对话历史完整保留并同步给新模型，消息中显示每条回复所属模型
 - **项目分组对话**：左侧按项目文件夹分组管理对话；对话持久化，自动以首条消息命名
-- **OpenCode 风格 Agent**：工具与提示词复用 OpenCode 的设计——`bash` / `list` / `read` / `write` / `edit` / `patch` / `glob` / `grep` / `todowrite`，全部以 **纯 NodeJS** 实现（`tools/agent-tools.mjs`），不依赖编译的二进制；系统提示词按 OpenCode 分层组装（语气、主动性、项目惯例、代码风格、任务流程、工具策略 + `<env>` 环境块 + `file:line` 引用规范）
+- **OpenCode 风格 Agent**：工具与提示词复用 OpenCode 的设计——`bash` / `list` / `read` / `write` / `edit` / `patch` / `glob` / `grep` / `todowrite`，全部以 **纯 NodeJS** 实现（`tools/agent-tools.mjs`），不依赖编译的二进制；正在分批移植到 Rust 原生实现（`src-tauri/src/tools/`，已覆盖除 bash 外的全部工具、输出逐字节对齐，用 `QS_TOOL_ENGINE=auto|rust` 切换，`pnpm tool:golden` 对照验证，见 `RUST-TOOLS-MIGRATION.md`）；系统提示词按 OpenCode 分层组装（语气、主动性、项目惯例、代码风格、任务流程、工具策略 + `<env>` 环境块 + `file:line` 引用规范）
 - **虚拟列表**：对话流使用 [stk-table-vue](https://ja-plus.github.io/stk-table-vue/) 单列虚拟滚动（`virtual` + `headless` + `autoRowHeight` 不等高行）；宽度变化时只清行高缓存（`clearAllAutoHeight` + 防抖 + 滚动位置恢复），不重挂载组件
 - **对话可视化**：文件改动徽章（新建/修改，可点击预览）、任务清单卡片、代码块语言标签 + 一键复制、工具结果自动折叠（运行中展开、结束收起）、左侧一问一答圆点导航（点击跳转到对应问答）
 - **流式输出**：Rust 端 reqwest 代理 SSE 流式响应（绕过浏览器网络限制），支持思考过程（reasoning_content）折叠展示
+- **后台运行可见**：左侧会话列表实时标记「Agent 正在哪条会话里干活」（转圈）与「已完成但没看过」（打勾）；回复完成时发**系统通知**（`tauri-plugin-notification`），点通知即跳回那条会话（可选项：顺便唤醒被最小化的窗口）
 - **安全沙箱**：所有文件操作路径都被限制在工作目录内（拒绝 `..`、绝对路径），bash 命令执行默认需要用户确认
 
 ## 演示模式

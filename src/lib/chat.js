@@ -8,7 +8,11 @@ import {
     toolsFor, executeTool, formatToolArgs, needsConfirm, toolMeta,
     isFileChange, simpleDiff, parseFrontmatter,
 } from './agent.js';
-import { buildApiMessages, estimateTokens, isContextOverflow, CONTEXT_TOKEN_BUDGET } from './context.js';
+import { buildApiMessages, estimateTokens, isContextOverflow, budgetForWindow } from './context.js';
+import {
+    notifyConversationDone, inForeground, takePendingJump, clearPendingJump,
+    onNotifyJump, readFlag,
+} from './notify.js';
 
 const MAX_AGENT_STEPS = 24;
 const LS_KEY = 'qs.v2'; // { conversations, projects, activeId, model }
@@ -48,6 +52,11 @@ function loadConfirmMode() {
 export const store = reactive({
     confirmMode: loadConfirmMode(),
     agentMode: loadFlag('qs.agent', true),
+    // 会话完成提醒：系统通知开关 + 是否顺手唤醒窗口（最小化时点通知才跳得回来）
+    notifyDone: readFlag('qs.notify', true),
+    notifyWake: readFlag('qs.notifyWake', false),
+    // Agent 正在跑的会话 id（左侧列表转圈用；切换会话不打断回合，故不能只看当前会话）
+    runningConvId: null,
     // [{id, title, workspace, providerId, model, messages, createdAt}]（旧数据自动补 providerId）
     conversations: (saved.conversations || []).map(c => c.providerId ? c : { ...c, providerId: QWEN_PROVIDER_ID }),
     projects: saved.projects || [],             // 已注册的项目文件夹路径
@@ -138,6 +147,27 @@ export function flushPersist() {
 
 if (typeof window !== 'undefined') {
     window.addEventListener('beforeunload', flushPersist);
+
+    // 跳转的两层实现：
+    //  1. 通知的点击回调（桌面端有 ACL 授权时才有）→ onNotifyJump 里直接跳；
+    //  2. 兜底 → 点通知会让桌面环境把窗口带回前台，focus 回来时跳。
+    //     takePendingJump 自己把关：只有真的 blur 过或被点击确认过的才放行，
+    //     否则用户只是切走又切回来就被抢走当前会话了。
+    const onBackToForeground = () => {
+        if (!inForeground()) return;
+        const target = takePendingJump();
+        if (target && target !== store.activeId) {
+            switchConversation(target);
+            return;
+        }
+        markRead(store.activeConv); // 回来就在看的这条，未读勾该消掉
+    };
+    window.addEventListener('focus', onBackToForeground);
+    document.addEventListener('visibilitychange', onBackToForeground);
+
+    onNotifyJump(id => {
+        if (store.conversations.some(c => c.id === id)) switchConversation(id);
+    });
 }
 
 /** 同步工具栏选中项到指定会话（providerId 缺失时回退内置千问） */
@@ -173,6 +203,7 @@ export function newConversation(workspace = '') {
         createdAt: Date.now(),
     };
     store.conversations.unshift(conv);
+    clearPendingJump(); // 用户开了新对话，别再自动跳回刚完成的那条
     store.activeId = conv.id;
     if (conv.workspace) {
         registerProject(conv.workspace);
@@ -184,10 +215,15 @@ export function newConversation(workspace = '') {
 }
 
 export function switchConversation(id) {
-    if (id === store.activeId) return;
     const conv = store.conversations.find(c => c.id === id);
     if (!conv) return;
+    if (id === store.activeId) {
+        markRead(conv); // 已经在这条会话上：点一下就该把「完成未读」的勾消掉
+        return;
+    }
     // 不再因流式输出中而阻止切换：进行中的回合会继续写入原会话（runTurn 已绑定会话对象）
+    clearPendingJump(id); // 用户手动选了目标，别让稍后的 focus 事件抢着跳
+    markRead(conv);
     store.activeId = id;
     if (conv.model) syncSelectionFromConv(conv);
     if (conv.workspace) store.expandedProjects[conv.workspace] = true;
@@ -195,7 +231,16 @@ export function switchConversation(id) {
     flushPersist();
 }
 
+/** 打开即已读：清掉左侧列表的「完成未读」勾 */
+export function markRead(conv) {
+    if (conv?.unread) {
+        conv.unread = false;
+        persist();
+    }
+}
+
 export function deleteConversation(id) {
+    clearPendingJump(id);
     store.conversations = store.conversations.filter(c => c.id !== id);
     if (store.activeId === id) {
         store.activeId = store.conversations[0]?.id || null;
@@ -340,9 +385,16 @@ async function readTextFile(ws, rel, cap, maxBytes = null) {
     }
 }
 
-/** 系统提示：运行环境必须取自真实平台，写死 Windows 会让 Linux/macOS 上的模型生成错命令 */
+/**
+ * 系统提示。运行环境必须取自真实平台，写死 Windows 会让 Linux/macOS 上的模型生成错命令。
+ *
+ * 拆成两段是为了前缀缓存：稳定内容（角色规范 + 工作目录 + 平台 + 项目指令/规则/技能）
+ * 在前，易变内容（今天日期、所用模型）单独成段排在最后。
+ * 日期翻页或切模型只重写最后那一小段，前面的项目规则与技能清单不再被连带冲掉。
+ * @returns {{stable: string, volatile: string}}
+ */
 function systemPrompt(conv, ctx, sys = { platformLabel: 'Unknown', shell: 'sh', arch: '' }) {
-    if (!conv.workspace || !store.agentMode) return '';
+    if (!conv.workspace || !store.agentMode) return { stable: '', volatile: '' };
     const lines = [];
     lines.push(
         '你是 Qwen Studio，一个运行在用户电脑上的交互式编程助手（工具与提示词规范对齐 OpenCode）。',
@@ -378,11 +430,10 @@ function systemPrompt(conv, ctx, sys = { platformLabel: 'Unknown', shell: 'sh', 
         '- edit 的 oldString 必须唯一；不唯一时带上相邻行作为上下文。',
         '- 引用代码位置时使用 `file_path:line_number` 格式，方便用户定位。',
         '',
+        // env 里只留同一会话内不变的两项；日期与模型见下面的 volatile
         '<env>',
         `  Working directory: ${conv.workspace}`,
         `  Platform: ${sys.platformLabel} (${sys.shell} shell)`,
-        `  Today's date: ${new Date().toISOString().slice(0, 10)}`,
-        `  Model: ${providerFor(conv)?.name || 'unknown'} · ${conv.model || modelState.selected.modelId}`,
         '</env>',
     );
     // 项目级上下文：AGENTS.md 指令 / .agents/rules 规则 / .agents/skills 技能目录
@@ -402,8 +453,25 @@ function systemPrompt(conv, ctx, sys = { platformLabel: 'Unknown', shell: 'sh', 
             );
         }
     }
-    return lines.join('\n');
+    const volatile = [
+        '<runtime>',
+        `  Today's date: ${new Date().toISOString().slice(0, 10)}`,
+        `  Model: ${providerFor(conv)?.name || 'unknown'} · ${conv.model || modelState.selected.modelId}`,
+        '</runtime>',
+    ].join('\n');
+    return { stable: lines.join('\n'), volatile };
 }
+
+/**
+ * 历史被裁剪时的说明。不带「省略了几组」这类每步都在变的数字，且固定接在易变段之后
+ * （system 数组尾部）——写进稳定段等于每步重写第 0 条消息，全量 miss。
+ */
+const HISTORY_TRIMMED_NOTICE = [
+    '<history>',
+    '  为控制上下文长度，较早的历史消息已被省略（要点见 <history-summary>）。',
+    '  若所需信息不在下文中，请重新用工具查询，或换用更小的读取范围。',
+    '</history>',
+].join('\n');
 
 /**
  * 一个回合只准备一次：项目上下文、@引用文件与系统提示。
@@ -412,7 +480,8 @@ function systemPrompt(conv, ctx, sys = { platformLabel: 'Unknown', shell: 'sh', 
 async function prepareContext(conv) {
     const sysInfo = await getSysInfo();
     const [ctx, attMap] = await Promise.all([loadProjectContext(conv), resolveAttachments(conv)]);
-    return { sysInfo, attMap, sys: systemPrompt(conv, ctx, sysInfo) };
+    const { stable, volatile } = systemPrompt(conv, ctx, sysInfo);
+    return { sysInfo, attMap, sys: stable, sysTail: volatile };
 }
 
 function mergeToolCallDelta(acc, deltas) {
@@ -537,7 +606,9 @@ export async function beautifyPrompt(text, handlers) {
 
 async function runTurn(conv) {
     store.sending = true;
+    store.runningConvId = conv.id;
     userAborted = false;
+    let outcome = 'done'; // done / error / aborted：收尾文案与通知措辞要用
     try {
         // 一个回合只准备一次上下文（以前每步重读文件、重发 @引用）
         const bundle = await prepareContext(conv);
@@ -558,10 +629,11 @@ async function runTurn(conv) {
 
             let res;
             try {
-                res = await requestWithRetry(item, conv, bundle);
+                res = await requestWithRetry(item, conv, bundle, step === 0);
             } catch (e) {
                 item.status = 'error';
                 item.errorText = `请求失败：${e.message || e}`;
+                outcome = 'error';
                 break;
             }
 
@@ -572,10 +644,12 @@ async function runTurn(conv) {
             if (res.error) {
                 // 错误只写 errorText（给用户看）：写进 content 会被当成助手发过的话回传给模型
                 item.errorText = `接口错误：${res.error}`;
+                outcome = 'error';
                 break;
             }
             if (res.aborted) {
                 if (!item.content && !toolCalls) item.content = '（已停止）';
+                outcome = 'aborted';
                 break;
             }
             if (!item.content && !toolCalls) {
@@ -611,8 +685,41 @@ async function runTurn(conv) {
         }
     } finally {
         store.sending = false;
+        if (store.runningConvId === conv.id) store.runningConvId = null;
         activeRid = null;
         flushPersist();
+        finishTurn(conv, outcome);
+    }
+}
+
+/** 通知正文：给出会话标题之外的最后一句实际产出，扫一眼就知道要不要回去看 */
+function notifyBody(conv, outcome) {
+    const msgs = conv.messages || [];
+    const last = [...msgs].reverse().find(m => m.role === 'assistant' && (m.content || m.errorText));
+    const raw = outcome === 'error'
+        ? (last?.errorText || '请求失败')
+        : (last?.content || '').replace(/\s+/g, ' ').trim() || '已完成，去看结果';
+    const head = outcome === 'error' ? '⚠ 回复失败：' : outcome === 'aborted' ? '已停止：' : '';
+    return (head + raw).slice(0, 140);
+}
+
+/**
+ * 回合收尾：标「完成未读」+ 发系统通知。
+ * 用户当时正盯着这个会话（窗口在前台且选中它）就既不打勾也不通知，避免噪音。
+ */
+function finishTurn(conv, outcome) {
+    const watched = store.activeId === conv.id && inForeground();
+    if (!watched) {
+        conv.unread = true;
+        persist();
+        if (store.notifyDone) {
+            notifyConversationDone({
+                convId: conv.id,
+                title: conv.title || '对话',
+                body: notifyBody(conv, outcome),
+                wake: store.notifyWake,
+            });
+        }
     }
 }
 
@@ -624,10 +731,18 @@ const TRANSIENT_RE = /网络请求失败|数据流中断|数据流读取超时|4
  * 请求失败自动重试 1-2 次（退避 500ms / 1500ms）。
  * 以前任何一次拖抖都直接 break，整轮任务报废。上下文超长那么现场缩预算重发一次。
  */
-async function requestWithRetry(item, conv, bundle) {
-    let budget = CONTEXT_TOKEN_BUDGET;
+function requestWithRetry(item, conv, bundle, atTurnStart) {
+    return requestWithRetryLoop(item, conv, bundle, contextBudget(conv), atTurnStart);
+}
+
+/** 该会话的历史预算：按供应商填的模型窗口换算，没填用保守值 */
+function contextBudget(conv) {
+    return budgetForWindow(providerFor(conv)?.contextWindow);
+}
+
+async function requestWithRetryLoop(item, conv, bundle, budget, atTurnStart) {
     for (let attempt = 1; ; attempt++) {
-        const res = await requestOnce(item, conv, bundle, budget);
+        const res = await requestOnce(item, conv, bundle, budget, atTurnStart);
         if (!res.error || res.aborted || userAborted || attempt >= MAX_ATTEMPTS) return res;
         const overflow = isContextOverflow(res.error);
         if (!overflow && !TRANSIENT_RE.test(res.error)) return res;
@@ -724,6 +839,10 @@ function settleRate(item, timing, jsFirst, jsLast) {
     item.outTk = tokens;
     item.tpsExact = real > 0;         // 统计口径：接口真实用量 / 字符估算
     item.ttftMs = timing?.ttftMs || 0;
+    // 输入侧用量：前缀缓存命中率的观测口径。没有这组数字，裁剪与缓存优化的收益全靠猜
+    item.inTk = timing?.promptTokens || 0;
+    item.cacheTk = timing?.cachedTokens || 0;
+    item.cacheWriteTk = timing?.cacheWriteTokens || 0;
     item.tpsWinMs = Math.round(windowMs || 0);
     item.tps = tokenRate(tokens, windowMs);
 }
@@ -733,15 +852,15 @@ function settleRate(item, timing, jsFirst, jsLast) {
  * @param bundle 回合级上下文（系统提示 / @引用 / 平台信息），由 runTurn 准备一次后逐步复用
  * @param budget 历史消息的 token 预算（撞上下文超限时会被压缩后重发）
  */
-async function requestOnce(item, conv, bundle, budget) {
+async function requestOnce(item, conv, bundle, budget, atTurnStart) {
     const messages = [];
-    const built = buildApiMessages(conv, bundle.attMap, budget);
-    let sys = bundle.sys;
-    if (built.droppedUnits) {
-        // 不静默丢历史：告诉模型被省略了多少，它才知道可能要重新查
-        sys += `\n\n<history>\n  为控制上下文长度，已省略较早的 ${built.droppedUnits} 组历史消息。若所需信息不在下文中，请重新用工具查询。\n</history>`;
-    }
-    if (sys) messages.push({ role: 'system', content: sys });
+    // refreeze：只有回合第一步允许重新给工具结果定档，回合内前缀保持只增不改
+    const built = buildApiMessages(conv, bundle.attMap, budget, { refreeze: atTurnStart });
+    if (bundle.sys) messages.push({ role: 'system', content: bundle.sys });
+    // 易变段单独成条排在最后：缓存断点因此能落在稳定段末尾（见 chat/protocols.rs）
+    let tail = bundle.sysTail || '';
+    if (built.droppedUnits) tail = `${tail}\n\n${HISTORY_TRIMMED_NOTICE}`;
+    if (tail) messages.push({ role: 'system', content: tail });
     messages.push(...built.messages);
 
     const provider = providerFor(conv);

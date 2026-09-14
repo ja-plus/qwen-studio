@@ -1,0 +1,6 @@
+{
+  "tool": "write",
+  "assert": "exact",
+  "ok": false,
+  "text": "符号链接 link-out.txt 指向工作目录之外，已拒绝访问"
+}

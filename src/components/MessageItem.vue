@@ -59,6 +59,23 @@ const tpsTitle = computed(() => {
     ].filter(Boolean).join('｜');
 });
 
+// 前缀缓存命中情况：命中率是「前缀只增不改」是否守住的直接指标
+const kfmt = n => (n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n || 0));
+const cacheInfo = computed(() => {
+    const it = props.item;
+    if (it.role !== 'assistant' || !it.inTk) return null;
+    const hit = it.cacheTk || 0;
+    const rate = hit && it.inTk ? Math.round((hit / it.inTk) * 100) : 0;
+    return {
+        text: `输入 ${kfmt(it.inTk)}${hit ? ` / 命中 ${kfmt(hit)} (${rate}%)` : ''}`,
+        title: [
+            `本次请求输入 ${it.inTk} token，其中 ${hit} 命中前缀缓存（${rate}%）`,
+            it.cacheWriteTk ? `新建缓存 ${it.cacheWriteTk} token` : '未使用显式缓存写入',
+            hit ? '' : '供应商未回传 cached_tokens，或该请求前缀太短未入缓存',
+        ].filter(Boolean).join('｜'),
+    };
+});
+
 // 文件类工具：提取路径用于徽章与预览
 const fileInfo = computed(() => {
     const it = props.item;
@@ -155,6 +172,7 @@ function openPreview() {
                 <span v-if="item.tps" class="tps" :title="tpsTitle">
                     {{ item.tpsExact ? '' : '≈' }}{{ item.tps }} token/s
                 </span>
+                <span v-if="cacheInfo" class="cache-badge" :title="cacheInfo.title">{{ cacheInfo.text }}</span>
             </div>
             <details v-if="item.reasoning" class="reasoning-box" :open="reasoningOpen" @toggle="onReasoningToggle">
                 <summary>{{ item.status === 'streaming' ? `思考中（${item.reasoning.length} 字）…` : `思考过程（${item.reasoning.length} 字）` }}</summary>

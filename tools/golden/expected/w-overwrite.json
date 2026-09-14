@@ -1,0 +1,10 @@
+{
+  "tool": "write",
+  "assert": "exact",
+  "ok": true,
+  "text": "已写入 a.txt（7 字符，3 行）",
+  "files": {
+    "a.txt": "重写\n第二行\n",
+    "b.md": "# B\r\nCR LF 混合\r\nline alpha\r\n"
+  }
+}

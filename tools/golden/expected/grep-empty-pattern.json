@@ -1,0 +1,6 @@
+{
+  "tool": "grep",
+  "assert": "exact",
+  "ok": false,
+  "text": "pattern 不能为空"
+}

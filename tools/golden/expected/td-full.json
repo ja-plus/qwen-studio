@@ -1,0 +1,6 @@
+{
+  "tool": "todowrite",
+  "assert": "exact",
+  "ok": true,
+  "text": "任务清单（1/4 完成）\n✔ ~~读代码~~\n◉ 改实现\n○ 补测试\n✕ 放弃这条"
+}

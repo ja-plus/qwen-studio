@@ -19,6 +19,33 @@ use std::time::{Duration, Instant};
 use tauri::{AppHandle, Manager};
 use tokio::sync::oneshot;
 
+/// 工具引擎开关（`QS_TOOL_ENGINE`），见仓库根 RUST-TOOLS-MIGRATION.md 的回退策略
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Engine {
+    /// 默认：全部走 Node 运行时（tools/agent-tools.mjs）
+    Node,
+    /// 已移植的工具走 Rust，其余回落 Node
+    Auto,
+    /// 只走 Rust：未移植的直接报错，供批次验收时确认没有偷偷回落
+    Rust,
+}
+
+fn engine() -> Engine {
+    static ENGINE: Lazy<Engine> = Lazy::new(|| {
+        match std::env::var("QS_TOOL_ENGINE")
+            .unwrap_or_default()
+            .trim()
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "rust" | "native" => Engine::Rust,
+            "auto" => Engine::Auto,
+            _ => Engine::Node,
+        }
+    });
+    *ENGINE
+}
+
 /// 常驻服务空闲超过此时长即回收（下次调用重生），不长期占用一个 Node 进程
 const IDLE_TTL: Duration = Duration::from_secs(90);
 /// 服务握手（ping）超时：超过即认为该 node 起不起常驻模式，换候选或回落
@@ -607,6 +634,17 @@ pub(crate) async fn node_tool(app: AppHandle, workspace: String, name: String, a
     // 校验工作目录有效（沙箱校验由 Node 端负责，这里先挡掉无效路径）
     if !PathBuf::from(&workspace).is_dir() {
         return Err(format!("工作目录无效：{workspace}"));
+    }
+
+    // 引擎分发：先于 Node 脚本定位，rust 模式下即使机器上没装 Node 也能跑已移植的工具
+    let eng = engine();
+    if eng != Engine::Node && crate::tools::supports(&name) {
+        return crate::tools::tool_native(workspace, name, args).await;
+    }
+    if eng == Engine::Rust {
+        return Err(format!(
+            "工具 {name} 尚未移植到 Rust 引擎（QS_TOOL_ENGINE=rust），去掉该环境变量可回到 Node 运行时"
+        ));
     }
     let script = agent_tools_script(&app).ok_or_else(|| {
         "未找到 tools/agent-tools.mjs（打包资源缺失）。开发模式请从项目根目录启动".to_string()

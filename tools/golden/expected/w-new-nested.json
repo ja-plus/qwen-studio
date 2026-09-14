@@ -1,0 +1,9 @@
+{
+  "tool": "write",
+  "assert": "exact",
+  "ok": true,
+  "text": "已写入 pkg/deep/new.ts（20 字符，2 行）",
+  "files": {
+    "pkg/deep/new.ts": "export const a = 1;\n"
+  }
+}

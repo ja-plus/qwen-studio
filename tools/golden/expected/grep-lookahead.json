@@ -1,0 +1,6 @@
+{
+  "tool": "grep",
+  "assert": "exact",
+  "ok": true,
+  "text": "a.txt:1:alpha line\nb.md:3:line alpha\ndocs/文档.txt:2:second 行 alpha"
+}

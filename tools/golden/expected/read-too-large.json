@@ -1,0 +1,6 @@
+{
+  "tool": "read",
+  "assert": "exact",
+  "ok": false,
+  "text": "文件过大（752.0 KB，上限 512KB），请用 offset/limit 分段读取"
+}

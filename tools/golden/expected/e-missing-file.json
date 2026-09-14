@@ -1,0 +1,6 @@
+{
+  "tool": "edit",
+  "assert": "error",
+  "ok": false,
+  "text": "ENOENT: no such file or directory, stat '/tmp/qs-golden-2OstWF/work/repo/nope.txt'"
+}

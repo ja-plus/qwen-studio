@@ -46,7 +46,7 @@ const TOOLS = [
                 properties: {
                     filePath: { type: 'string', description: '相对工作目录的文件路径' },
                     offset: { type: 'number', description: '起始行号（从 1 开始）' },
-                    limit: { type: 'number', description: '读取行数（默认 2000）' },
+                    limit: { type: 'number', description: '读取行数（默认 600，最大 2000）' },
                 },
                 required: ['filePath'],
             },

@@ -10,9 +10,21 @@ use crate::types::ChatReq;
 use protocols::{anthropic_body, chat_body, responses_body};
 use serde_json::Value;
 use sse::{handle_anthropic_sse, handle_openai_sse, handle_responses_sse, stream_sse};
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 use tauri::AppHandle;
+
+/// 端点不认 `cache_control`（不少第三方兼容网关会 400）时全局降级：
+/// 之后所有请求都不再打显式缓存断点，免得每次都要先白撞一次失败的请求。
+static CACHE_MARKER_REJECTED: AtomicBool = AtomicBool::new(false);
+
+fn build_body(req: &ChatReq, protocol: &str, use_cache: bool) -> Value {
+    match protocol {
+        "anthropic" => anthropic_body(req, use_cache),
+        "responses" => responses_body(req),
+        _ => chat_body(req, use_cache),
+    }
+}
 
 async fn run_chat(app: AppHandle, rid: String, req: ChatReq) {
     let protocol = req.protocol.clone().unwrap_or_else(|| "chat".to_string());
@@ -34,11 +46,8 @@ async fn run_chat(app: AppHandle, rid: String, req: ChatReq) {
         None => return fail_chat(&app, &rid, "缺少 API Key：请在设置中为当前供应商填写 API Key，或设置环境变量 DASHSCOPE_API_KEY"),
     };
 
-    let mut body = match protocol.as_str() {
-        "anthropic" => anthropic_body(&req),
-        "responses" => responses_body(&req),
-        _ => chat_body(&req),
-    };
+    let mut use_cache = !CACHE_MARKER_REJECTED.load(Ordering::Relaxed);
+    let mut body = build_body(&req, &protocol, use_cache);
 
     let client = match reqwest::Client::builder().timeout(Duration::from_secs(600)).build() {
         Ok(c) => c,
@@ -59,6 +68,13 @@ async fn run_chat(app: AppHandle, rid: String, req: ChatReq) {
                 // stream_options 是真实 token 用量的开关，个别兼容端点不认这个字段：去掉后重发一次
                 if code == 400 && txt.contains("stream_options") && body.get("stream_options").is_some() {
                     body.as_object_mut().and_then(|o| o.remove("stream_options"));
+                    continue;
+                }
+                // 显式缓存断点同理：该端点不认就把 cache_control 全部摘掉重发
+                if code == 400 && txt.contains("cache_control") && use_cache {
+                    CACHE_MARKER_REJECTED.store(true, Ordering::Relaxed);
+                    use_cache = false;
+                    body = build_body(&req, &protocol, false);
                     continue;
                 }
                 return fail_chat(&app, &rid, &format!("HTTP {code}: {}", truncate_str(&txt, 600)));

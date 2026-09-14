@@ -1,0 +1,6 @@
+{
+  "tool": "skill",
+  "assert": "exact",
+  "ok": true,
+  "text": "---\nname: flat\ndescription: 平铺技能\n---\n正文\n"
+}

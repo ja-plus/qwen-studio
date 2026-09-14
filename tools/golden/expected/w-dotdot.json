@@ -1,0 +1,6 @@
+{
+  "tool": "write",
+  "assert": "exact",
+  "ok": false,
+  "text": "不允许访问工作目录之外的路径"
+}

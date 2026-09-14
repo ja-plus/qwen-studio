@@ -1,0 +1,6 @@
+{
+  "tool": "skill",
+  "assert": "exact",
+  "ok": true,
+  "text": "---\nname: release\ndescription: 发布流程\n---\n\n# 发布\n第一步：跑测试。\n"
+}

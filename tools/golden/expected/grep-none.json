@@ -1,0 +1,6 @@
+{
+  "tool": "grep",
+  "assert": "exact",
+  "ok": true,
+  "text": "没有匹配 /zzz-不存在-xyz/ 的内容"
+}

@@ -1,0 +1,6 @@
+{
+  "tool": "write",
+  "assert": "exact",
+  "ok": false,
+  "text": "符号链接 dangling.md 指向不存在或工作目录之外的路径，已拒绝访问"
+}

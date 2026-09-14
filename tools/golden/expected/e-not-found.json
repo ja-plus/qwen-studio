@@ -1,0 +1,6 @@
+{
+  "tool": "edit",
+  "assert": "exact",
+  "ok": false,
+  "text": "oldString 在文件中不存在，请先 read 确认内容"
+}

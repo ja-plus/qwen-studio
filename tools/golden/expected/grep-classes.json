@@ -1,0 +1,6 @@
+{
+  "tool": "grep",
+  "assert": "exact",
+  "ok": true,
+  "text": "a.txt:1:alpha line\na.txt:2:second line"
+}

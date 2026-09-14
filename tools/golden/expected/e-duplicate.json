@@ -1,0 +1,6 @@
+{
+  "tool": "edit",
+  "assert": "exact",
+  "ok": false,
+  "text": "oldString 在文件中出现多次，请扩大范围使其唯一（可包含更多上下文行）"
+}

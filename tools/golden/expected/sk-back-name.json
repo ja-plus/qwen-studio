@@ -1,0 +1,6 @@
+{
+  "tool": "skill",
+  "assert": "exact",
+  "ok": false,
+  "text": "name 必须是技能名（.agents/skills/ 下的目录名，不含路径分隔符）"
+}

@@ -30,6 +30,7 @@ function makeQwenProvider() {
         apiKey: loadStr('qs.apiKey', ''),
         protocol: 'chat',
         builtin: true,
+        contextWindow: 0,
         models: [],
         fetchedAt: 0,
     };
@@ -45,6 +46,8 @@ function loadState() {
             for (const p of raw.providers) {
                 p.models = Array.isArray(p.models) ? p.models : [];
                 p.protocol = p.protocol || 'chat';
+                // 上下文窗口（token）选填：填了才能按窗口算历史预算，见 context.js 的 budgetForWindow
+                p.contextWindow = Number(p.contextWindow) > 0 ? Math.floor(Number(p.contextWindow)) : 0;
             }
             if (!raw.selected?.providerId) {
                 raw.selected = { providerId: QWEN_PROVIDER_ID, modelId: DEFAULT_MODEL };

@@ -1,0 +1,6 @@
+{
+  "tool": "glob",
+  "assert": "exact",
+  "ok": true,
+  "text": "node_modules/pkg/i.js\nsrc/app.js"
+}

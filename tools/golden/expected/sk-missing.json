@@ -1,0 +1,6 @@
+{
+  "tool": "skill",
+  "assert": "exact",
+  "ok": false,
+  "text": "技能不存在：nope（可在项目的 .agents/skills/ 目录下创建，可用技能见系统提示中的列表）"
+}

@@ -1,0 +1,9 @@
+{
+  "tool": "write",
+  "assert": "exact",
+  "ok": true,
+  "text": "已写入 n.txt（0 字符，1 行）",
+  "files": {
+    "n.txt": ""
+  }
+}

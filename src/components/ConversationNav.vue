@@ -41,6 +41,21 @@ function newConvIn(ws) {
     if (store.sending) return;
     newConversation(ws);
 }
+
+// ---------- 会话运行状态 ----------
+// 只有 active 会话在跑是不够的：切换会话不打断回合，别的会话可能正在后台生成
+const convRunning = c => store.runningConvId === c.id;
+
+/** 项目分组行上的聚合状态：组内有会话在跑就转圈，有完成未读就打勾（带条数） */
+function groupState(g) {
+    let running = false;
+    let unread = 0;
+    for (const c of g.convs) {
+        if (convRunning(c)) running = true;
+        else if (c.unread) unread++;
+    }
+    return { running, unread };
+}
 </script>
 
 <template>
@@ -57,6 +72,10 @@ function newConvIn(ws) {
                     </span>
                     <span class="p-name" @click="g.workspace && toggleProject(g.workspace)">{{
                         g.workspace ? '📁 ' + g.name : g.name }}</span>
+                    <span v-if="groupState(g).running" class="spinner c-spin" title="该分组下有会话正在运行"></span>
+                    <span v-else-if="groupState(g).unread" class="c-tick"
+                        :title="`该分组下有 ${groupState(g).unread} 个会话已完成未查看`">✓
+                        <em v-if="groupState(g).unread > 1">{{ groupState(g).unread }}</em></span>
                     <template v-if="g.workspace">
                         <button class="icon-btn" title="浏览项目文件"
                             @click.stop="toggleProjectFiles(g.workspace)">🌳</button>
@@ -73,8 +92,13 @@ function newConvIn(ws) {
                     <FileTree v-if="g.workspace && store.showProjectFiles[g.workspace]"
                         :workspace="g.workspace" @preview="p => emit('preview', p)" />
                     <div v-for="c in g.convs" :key="c.id" class="conv-row"
-                        :class="{ active: c.id === store.activeId }" :title="c.title"
+                        :class="{ active: c.id === store.activeId, unread: c.unread, running: convRunning(c) }"
+                        :title="convRunning(c) ? `${c.title}｜Agent 正在运行…` : (c.unread ? `${c.title}｜已完成，还没查看` : c.title)"
                         @click="switchConversation(c.id)">
+                        <span class="c-status">
+                            <span v-if="convRunning(c)" class="spinner c-spin"></span>
+                            <span v-else-if="c.unread" class="c-tick">✓</span>
+                        </span>
                         <span class="c-title">{{ c.title }}</span>
                         <span v-if="c.model" class="c-model">{{ c.model }}</span>
                         <button class="icon-btn" title="删除对话"

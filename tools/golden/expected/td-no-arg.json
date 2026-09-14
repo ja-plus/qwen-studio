@@ -1,0 +1,6 @@
+{
+  "tool": "todowrite",
+  "assert": "exact",
+  "ok": true,
+  "text": "（已清空任务清单）"
+}

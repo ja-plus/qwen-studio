@@ -1,0 +1,6 @@
+{
+  "tool": "list",
+  "assert": "exact",
+  "ok": true,
+  "text": "-      39 B  docs/文档.txt"
+}

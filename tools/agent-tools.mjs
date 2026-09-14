@@ -22,6 +22,9 @@ import readline from 'node:readline';
 const IGNORE_DIRS = new Set(['node_modules', '.git', 'dist', 'target', '.next', '.nuxt', '.cache', '.pnpm-store']);
 const MAX_READ_BYTES = 512 * 1024;
 const MAX_LINE_OUTPUT = 2000;
+// 默认只给 600 行：整文件回灌会把工具结果撑到几千 token 并一路重发，
+// 需要更多用 offset 续读（宁可多一次调用，也别把历史喂胖）
+const DEFAULT_READ_LINES = 600;
 
 // ---------- 沙箱：所有路径必须位于工作目录内（含符号链接解析） ----------
 
@@ -75,6 +78,17 @@ async function resolveInWorkspace(workspace, rel = '') {
         cur = real;
     }
     if (!isUnder(root, path.resolve(cur))) throw new Error('不允许访问工作目录之外的路径');
+    // 最终目标再核一次真实路径：挡住「前面每一跳都查过，最后一段才被换成软链」的窗口。
+    // 与 Rust 端 src-tauri/src/tools/sandbox.rs 同步，两侧行为必须一致（golden 会验）。
+    try {
+        const fin = await fs.realpath(cur);
+        if (!isUnder(root, fin)) {
+            throw new Error(`符号链接 ${path.basename(cur)} 指向工作目录之外，已拒绝访问`);
+        }
+        cur = fin;
+    } catch (e) {
+        if (e.code !== 'ENOENT' && e.code !== 'ENOTDIR') throw e;
+    }
     return { root, target: cur };
 }
 
@@ -108,6 +122,9 @@ async function* walk(dir, { all = false } = {}) {
     } catch {
         return;
     }
+    // 定序：readdir 的顺序随文件系统变（ext4 是 inode 序），不排序就没法做逐字节
+    // 对照（tools/golden），且顺序稳定对前缀缓存也有利。Rust 端 walk 同规则。
+    entries.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
     for (const e of entries) {
         if (e.name.startsWith('.')) continue;
         const full = path.join(dir, e.name);
@@ -181,7 +198,7 @@ async function toolRead(args, ws) {
     const content = await fs.readFile(target, 'utf8');
     const lines = content.split('\n');
     const offset = Math.max(1, Math.floor(args.offset ?? 1));
-    const limit = Math.min(MAX_LINE_OUTPUT, Math.floor(args.limit ?? 2000));
+    const limit = Math.min(MAX_LINE_OUTPUT, Math.floor(args.limit ?? DEFAULT_READ_LINES));
     const slice = lines.slice(offset - 1, offset - 1 + limit);
     const rel = path.relative(root, target).replace(/\\/g, '/');
     const numbered = slice.map((l, i) => `${String(offset + i).padStart(6)}\t${l}`).join('\n');
@@ -220,10 +237,17 @@ async function toolEdit(args, ws) {
 
 // ---------- patch：unified diff 应用 ----------
 
+/**
+ * 解析 unified diff。
+ * 注意末尾换行：`"…\n".split('\n')` 会多切出一个空串，它不以 +- 开头，
+ * 会被当成一条「空上下文行」参与匹配 —— 早先版本没剥掉它，导致所有
+ * 以换行结尾的标准 diff（git 产出的全是）最后一个 hunk 匹配失败。
+ */
 function parseUnifiedDiff(diffText) {
+    const text = diffText.endsWith('\n') ? diffText.slice(0, -1) : diffText;
     const hunks = [];
     let cur = null;
-    for (const raw of diffText.split('\n')) {
+    for (const raw of text.split('\n')) {
         const line = raw.replace(/\r$/, '');
         const m = line.match(/^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/);
         if (m) {
@@ -239,23 +263,33 @@ function parseUnifiedDiff(diffText) {
 }
 
 function applyHunks(content, hunks) {
-    let lines = content.split('\n');
+    // 空文件（含新建）没有「一行空串」，否则新文件的补丁会在开头多插一个空行
+    let lines = content === '' ? [] : content.split('\n');
     for (const h of hunks) {
         const body = h.lines;
-        const removed = body.filter(l => l.startsWith('-') && !l.startsWith('---')).map(l => l.slice(1));
-        const added = body.filter(l => l.startsWith('+') && !l.startsWith('+++')).map(l => l.slice(1));
-        const context = body.filter(l => !l.startsWith('+') && !l.startsWith('-')).map(l => l.slice(1));
-        // 期望块 = context 与 removed 按原顺序
+        // expected = 上下文 + 被删行（用于定位）；replacement = 上下文 + 新增行（用于回填）。
+        // 早先版本用 splice(pos, expected.length, ...added)：上下文行既在窗口里又被 added 漏掉，
+        // 等于把每个 hunk 的上下文整段删掉——数据丢失级 bug，务必保持现在这份语义。
         const expected = [];
+        const replacement = [];
         for (const l of body) {
-            if (l.startsWith('+')) continue;
-            if (l.startsWith('---')) continue;
-            expected.push(l.slice(1));
+            if (l.startsWith('+')) {
+                if (!l.startsWith('+++')) replacement.push(l.slice(1));
+                continue;
+            }
+            const text = l.slice(1);
+            if (l.startsWith('-')) { expected.push(text); continue; }
+            expected.push(text);
+            replacement.push(text);
         }
-        // 从 oldStart-1 开始向前向后查找匹配位置（容忍少量偏移）
+        // 纯新增块（expected 为空）不能走「就近匹配」：空串在任何位置都算命中，
+        // 会把内容插到文件开头。git 的 `-l,0` 语义是「在第 l 行之后插入」，直接用它。
         let pos = -1;
         const startFrom = Math.max(0, h.oldStart - 1);
-        for (let d = 0; d <= 50; d++) {
+        if (expected.length === 0) {
+            pos = Math.min(h.oldStart, lines.length);
+        }
+        for (let d = 0; pos === -1 && d <= 50; d++) {
             for (const cand of [startFrom + d, startFrom - d]) {
                 if (cand < 0 || cand + expected.length > lines.length) continue;
                 let ok = true;
@@ -264,12 +298,11 @@ function applyHunks(content, hunks) {
                 }
                 if (ok) { pos = cand; break; }
             }
-            if (pos !== -1) break;
         }
         if (pos === -1) {
             throw new Error(`补丁无法应用：第 ${h.oldStart} 行附近的内容与 diff 不匹配（文件可能已被修改，请先 read 最新内容）`);
         }
-        lines.splice(pos, expected.length, ...added);
+        lines.splice(pos, expected.length, ...replacement);
     }
     return lines.join('\n');
 }

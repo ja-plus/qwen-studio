@@ -9,11 +9,15 @@
     "build": "rspack build",
     "preview": "rspack preview",
     "tauri": "node scripts/tauri.mjs",
-    "icon": "node scripts/gen-icon.mjs"
+    "icon": "node scripts/gen-icon.mjs",
+    "tool:golden": "node tools/golden/compare.mjs",
+    "tool:record": "node tools/golden/record.mjs",
+    "prefix:stability": "node scripts/prefix-stability.mjs"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.9.0",
     "@tauri-apps/plugin-dialog": "^2.4.0",
+    "@tauri-apps/plugin-notification": "^2.4.0",
     "dompurify": "^3.2.3",
     "marked": "^16.3.0",
     "openai": "^7.5.0",
