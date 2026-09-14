@@ -2500,6 +2500,7 @@ name = "qwen-studio"
 version = "0.1.0"
 dependencies = [
  "futures-util",
+ "libc",
  "once_cell",
  "reqwest 0.12.28",
  "serde",

@@ -161,6 +161,8 @@ function openPreview() {
                 <div ref="rContentRef" class="r-content">{{ item.reasoning }}</div>
             </details>
             <div v-if="html" class="body md" @click="onMdClick" v-html="html"></div>
+            <!-- 接口/请求错误只展示，不写进 content（否则会被当成助手说过的话回传给模型） -->
+            <div v-if="item.errorText" class="err-banner">{{ item.errorText }}</div>
             <span v-if="item.status === 'streaming'" class="streaming-cursor"></span>
         </div>
     </div>

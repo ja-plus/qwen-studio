@@ -5,7 +5,7 @@ import { tauriInvoke } from './bridge.js';
  * 实现位于 tools/agent-tools.mjs（纯 NodeJS，无原生二进制依赖），
  * 由 Rust 端 node_tool 命令在 Node 子进程中执行。
  */
-export const TOOLS = [
+const TOOLS = [
     {
         type: 'function',
         function: {
@@ -169,6 +169,26 @@ export const TOOLS = [
         },
     },
 ];
+
+/**
+ * 按运行平台生成工具定义。
+ * bash 的描述不能写死 Windows：Linux/macOS 下实际走 sh，告诉模型是 cmd 就会生成错命令。
+ * @param {{os:string,shell:string,platformLabel:string}} sys
+ */
+let toolsCache = null;
+export function toolsFor(sys) {
+    if (toolsCache) return toolsCache;
+    const shell = sys?.shell || 'sh';
+    const note = shell === 'cmd' ? 'Windows 下经 cmd' : `${shell} shell（POSIX 语法）`;
+    toolsCache = TOOLS.map(t => (t.function.name === 'bash' ? {
+        ...t,
+        function: {
+            ...t.function,
+            description: `在工作目录执行单条 shell 命令（${note}），超时最长 180 秒。适合安装依赖、运行脚本、构建、git 等操作。`,
+        },
+    } : t));
+    return toolsCache;
+}
 
 /** 执行工具：经 Rust 桥接在 NodeJS 子进程中运行 tools/agent-tools.mjs */
 export async function executeTool(name, args, workspace) {

@@ -152,6 +152,12 @@ function onPreview(path) {
                 <button @click="store.error = ''">✕</button>
             </div>
 
+            <!-- 本地存储写失败不能静默：用户必须知道对话没保住 -->
+            <div v-if="store.persistError" class="error-banner">
+                <span>💾 {{ store.persistError }}</span>
+                <button @click="store.persistError = ''">✕</button>
+            </div>
+
             <MessageList />
             <Composer @open-settings="showSettings = true" />
         </main>

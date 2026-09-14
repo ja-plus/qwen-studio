@@ -1,6 +1,6 @@
 <script setup>
 import { ref, computed } from 'vue';
-import { store, persist } from '../lib/chat.js';
+import { store, flushPersist } from '../lib/chat.js';
 import {
     modelState, persistModelState, refreshQwenModels, prettifyModelId,
     PROTOCOLS, QWEN_PROVIDER_ID, DEFAULT_MODEL,
@@ -113,7 +113,7 @@ function save() {
         }
     }
     persistModelState();
-    persist();
+    flushPersist();
     emit('close');
 }
 </script>

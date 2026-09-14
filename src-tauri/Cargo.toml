@@ -13,9 +13,13 @@ tauri-plugin-dialog = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "process"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "process", "sync"] }
 futures-util = "0.3"
 once_cell = "1"
+
+# Unix 下用于 killpg 杀整棵进程组（已在依赖树内，不额外引入编译成本）
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [profile.release]
 strip = true

@@ -7,7 +7,9 @@
  * 用法：
  *   单次模式（默认）：从 stdin 读入一个 JSON 请求，向 stdout 输出一个 JSON 响应
  *     echo '{"id":1,"workspace":"D:/proj","name":"read","args":{"filePath":"package.json"}}' | node agent-tools.mjs
- *   常驻模式：--serve，按行读取 JSON 请求、按行输出 JSON 响应（供长期复用进程）
+ *   常驻模式：--serve，按行读取 JSON 请求、按行输出 JSON 响应（长期复用进程，请求间并发执行）
+ *     控制消息：{"ctrl":"cancel","target":<请求 id>} 中止在途请求（bash 会杀掉整棵进程树）
+ *     探活消息：{"name":"ping"} -> "pong"
  *
  * 响应格式：{"id":..,"ok":true,"result":"文本结果"} 或 {"id":..,"ok":false,"error":"错误说明"}
  */
@@ -21,23 +23,59 @@ const IGNORE_DIRS = new Set(['node_modules', '.git', 'dist', 'target', '.next', 
 const MAX_READ_BYTES = 512 * 1024;
 const MAX_LINE_OUTPUT = 2000;
 
-// ---------- 沙箱：所有路径必须位于工作目录内 ----------
+// ---------- 沙箱：所有路径必须位于工作目录内（含符号链接解析） ----------
 
-function resolveInWorkspace(workspace, rel = '') {
-    const root = path.resolve(workspace);
-    let p = root;
+const CASE_INSENSITIVE = process.platform === 'win32' || process.platform === 'darwin';
+
+/** p 是否位于 root 内（含 root 自身）；大小写敏感性跟随平台 */
+function isUnder(root, p) {
+    const r = CASE_INSENSITIVE ? root.toLowerCase() : root;
+    const x = CASE_INSENSITIVE ? p.toLowerCase() : p;
+    return x === r || x.startsWith(r + path.sep) || x.startsWith(r + '/');
+}
+
+/**
+ * 逐段解析相对路径：每一跳都做 realpath，软链一旦指向工作区外立即拒绝。
+ * 只按字符串挡 `..` 是无效的——工作区内一个指向 ~/.ssh 的软链即可穿透。
+ */
+async function resolveInWorkspace(workspace, rel = '') {
+    const rawRoot = path.resolve(workspace);
+    let root = rawRoot;
+    try {
+        root = await fs.realpath(rawRoot);
+    } catch { /* 工作目录不存在：保持原样，后续操作自会报错 */ }
+
     const r = (rel || '').trim();
-    if (r && r !== '.') {
-        if (/^[a-zA-Z]:/.test(r) || r.startsWith('/') || r.startsWith('\\')) {
-            throw new Error('只允许使用相对工作目录的路径');
-        }
-        for (const seg of r.split(/[\\/]+/)) {
-            if (seg === '' || seg === '.') continue;
-            if (seg === '..') throw new Error('不允许访问工作目录之外的路径');
-            p = path.join(p, seg);
-        }
+    if (!r || r === '.') return { root, target: root };
+    if (/^[a-zA-Z]:/.test(r) || r.startsWith('/') || r.startsWith('\\')) {
+        throw new Error('只允许使用相对工作目录的路径');
     }
-    return { root, target: p };
+
+    let cur = root;
+    for (const seg of r.split(/[\\/]+/)) {
+        if (seg === '' || seg === '.') continue;
+        if (seg === '..') throw new Error('不允许访问工作目录之外的路径');
+        cur = path.join(cur, seg);
+        let real;
+        try {
+            real = await fs.realpath(cur);
+        } catch (e) {
+            if (e.code === 'ENOENT' || e.code === 'ENOTDIR') {
+                // 展开失败但自身是软链 = 悬空链/链接环：写入会顺着它在外部落盘，必须拒
+                let st = null;
+                try { st = await fs.lstat(cur); } catch { /* 确实不存在 */ }
+                if (st?.isSymbolicLink()) {
+                    throw new Error(`符号链接 ${seg} 指向不存在或工作目录之外的路径，已拒绝访问`);
+                }
+                continue; // 尚未创建：按字面继续拼接
+            }
+            throw e;
+        }
+        if (!isUnder(root, real)) throw new Error(`符号链接 ${seg} 指向工作目录之外，已拒绝访问`);
+        cur = real;
+    }
+    if (!isUnder(root, path.resolve(cur))) throw new Error('不允许访问工作目录之外的路径');
+    return { root, target: cur };
 }
 
 function fmtSize(n) {
@@ -115,7 +153,7 @@ function globToRegExp(pattern) {
 // ---------- 工具实现 ----------
 
 async function toolList(args, ws) {
-    const { root, target } = resolveInWorkspace(ws, args.path);
+    const { root, target } = await resolveInWorkspace(ws, args.path);
     const entries = await fs.readdir(target, { withFileTypes: true }).catch(e => {
         throw new Error(`读取目录失败：${e.message}`);
     });
@@ -138,7 +176,7 @@ async function toolList(args, ws) {
 }
 
 async function toolRead(args, ws) {
-    const { root, target } = resolveInWorkspace(ws, args.filePath);
+    const { root, target } = await resolveInWorkspace(ws, args.filePath);
     await assertTextFile(target);
     const content = await fs.readFile(target, 'utf8');
     const lines = content.split('\n');
@@ -154,7 +192,7 @@ async function toolRead(args, ws) {
 }
 
 async function toolWrite(args, ws) {
-    const { root, target } = resolveInWorkspace(ws, args.filePath);
+    const { root, target } = await resolveInWorkspace(ws, args.filePath);
     await fs.mkdir(path.dirname(target), { recursive: true });
     const content = args.content ?? '';
     await fs.writeFile(target, content, 'utf8');
@@ -163,7 +201,7 @@ async function toolWrite(args, ws) {
 }
 
 async function toolEdit(args, ws) {
-    const { root, target } = resolveInWorkspace(ws, args.filePath);
+    const { root, target } = await resolveInWorkspace(ws, args.filePath);
     await assertTextFile(target);
     const content = await fs.readFile(target, 'utf8');
     const oldStr = args.oldString ?? '';
@@ -237,7 +275,7 @@ function applyHunks(content, hunks) {
 }
 
 async function toolPatch(args, ws) {
-    const { root, target } = resolveInWorkspace(ws, args.filePath);
+    const { root, target } = await resolveInWorkspace(ws, args.filePath);
     const hunks = parseUnifiedDiff(args.diff ?? '');
     if (!hunks.length) throw new Error('未解析到有效的 @@ hunk，请提供标准 unified diff');
     let content = '';
@@ -258,7 +296,7 @@ async function toolPatch(args, ws) {
 // ---------- glob / grep ----------
 
 async function toolGlob(args, ws) {
-    const { root } = resolveInWorkspace(ws, '');
+    const { root } = await resolveInWorkspace(ws, '');
     const re = globToRegExp(args.pattern || '*');
     const out = [];
     for await (const file of walk(root, { all: !!args.all })) {
@@ -272,7 +310,7 @@ async function toolGlob(args, ws) {
 }
 
 async function toolGrep(args, ws) {
-    const { root, target } = resolveInWorkspace(ws, args.path || '');
+    const { root, target } = await resolveInWorkspace(ws, args.path || '');
     if (!args.pattern) throw new Error('pattern 不能为空');
     const flags = args.ignoreCase ? 'i' : '';
     let re;
@@ -325,40 +363,72 @@ async function toolGrep(args, ws) {
 
 // ---------- bash ----------
 
-function runShell(command, cwd, timeoutMs) {
+/** 杀掉整棵进程树：仅杀直接子进程会留下继续写文件的 bash 子孙，副作用失控 */
+function killTree(proc) {
+    if (!proc?.pid) return;
+    if (process.platform === 'win32') {
+        try { spawn('taskkill', ['/PID', String(proc.pid), '/T', '/F'], { windowsHide: true }); } catch { /* 已退出 */ }
+        return;
+    }
+    // POSIX：子进程以 detached 启动，自成进程组，kill(-pid) 覆盖整组
+    try {
+        process.kill(-proc.pid, 'SIGKILL');
+    } catch {
+        try { proc.kill('SIGKILL'); } catch { /* 已退出 */ }
+    }
+}
+
+/**
+ * 执行单条 shell 命令。
+ * @param {number} timeoutMs 超时（到时杀进程树）
+ * @param {AbortSignal} [signal] 用户停止生成时中止
+ */
+function runShell(command, cwd, timeoutMs, signal) {
     return new Promise(resolve => {
         const isWin = process.platform === 'win32';
         const cmd = isWin
-            ? spawn('cmd', ['/C', `chcp 65001 >nul & ${command}`], { cwd, windowsHide: true })
-            : spawn('sh', ['-c', command], { cwd });
+            ? spawn('cmd', ['/C', `chcp 65001 >nul & ${command}`], { cwd, windowsHide: true, detached: true })
+            : spawn('sh', ['-c', command], { cwd, detached: true });
         let stdout = '', stderr = '';
         let killed = false;
+        let cancelled = false;
+        let settled = false;
         const timer = setTimeout(() => {
             killed = true;
-            cmd.kill('SIGKILL');
+            killTree(cmd);
         }, timeoutMs);
+        const onAbort = () => {
+            cancelled = true;
+            killTree(cmd);
+        };
+        if (signal) {
+            if (signal.aborted) onAbort();
+            else signal.addEventListener('abort', onAbort, { once: true });
+        }
+        const finish = r => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(timer);
+            signal?.removeEventListener('abort', onAbort);
+            resolve(r);
+        };
         cmd.stdout.on('data', d => { if (stdout.length < 200000) stdout += d.toString(); });
         cmd.stderr.on('data', d => { if (stderr.length < 200000) stderr += d.toString(); });
-        cmd.on('error', e => {
-            clearTimeout(timer);
-            resolve({ error: `无法启动命令：${e.message}（Windows 下请确认命令存在）` });
-        });
-        cmd.on('close', code => {
-            clearTimeout(timer);
-            resolve({ code: code ?? -1, stdout, stderr, killed });
-        });
+        cmd.on('error', e => finish({ error: `无法启动命令：${e.message}（Windows 下请确认命令存在）` }));
+        cmd.on('close', code => finish({ code: code ?? -1, stdout, stderr, killed, cancelled }));
     });
 }
 
-async function toolBash(args, ws) {
-    const { root } = resolveInWorkspace(ws, '');
+async function toolBash(args, ws, signal) {
+    const { root } = await resolveInWorkspace(ws, '');
     const command = (args.command ?? '').trim();
     if (!command) throw new Error('command 不能为空');
     const timeout = Math.min(180000, Math.max(5000, Math.floor(args.timeout ?? 120000)));
-    const r = await runShell(command, root, timeout);
+    const r = await runShell(command, root, timeout, signal);
     if (r.error) throw new Error(r.error);
+    if (r.cancelled) throw new Error('命令已被用户停止（关联的子进程已全部终止）');
     const parts = [];
-    if (r.killed) parts.push(`（命令超时 ${timeout / 1000}s，已终止）`);
+    if (r.killed) parts.push(`（命令超时 ${timeout / 1000}s，已终止进程树）`);
     parts.push(`exit code: ${r.code}`);
     if (r.stdout.trim()) parts.push(`stdout:\n${r.stdout.trim()}`);
     if (r.stderr.trim()) parts.push(`stderr:\n${r.stderr.trim()}`);
@@ -389,7 +459,7 @@ async function toolSkill(args, ws) {
     ];
     for (const rel of candidates) {
         try {
-            const { target } = resolveInWorkspace(ws, rel);
+            const { target } = await resolveInWorkspace(ws, rel);
             const content = await fs.readFile(target, 'utf8');
             if (content.length > 64 * 1024) {
                 return content.slice(0, 64 * 1024) + '\n…（技能内容过长，已截断）';
@@ -417,12 +487,12 @@ const HANDLERS = {
     skill: toolSkill,
 };
 
-async function handle(req) {
+async function handle(req, signal) {
     const name = req.name;
     const fn = HANDLERS[name];
     if (!fn) throw new Error(`未知工具：${name}（可用：${Object.keys(HANDLERS).join(', ')}）`);
     if (name !== 'todowrite' && !req.workspace) throw new Error('缺少 workspace');
-    return fn(req.args || {}, req.workspace);
+    return fn(req.args || {}, req.workspace, signal);
 }
 
 async function readAllStdin() {
@@ -431,21 +501,62 @@ async function readAllStdin() {
     return Buffer.concat(chunks).toString('utf8');
 }
 
+/** 串行写队列：单条响应可能远大于管道缓冲区，并发直写会把两行拆断交错 */
+function makeWriter(out) {
+    let chain = Promise.resolve();
+    return obj => {
+        const s = JSON.stringify(obj) + '\n';
+        chain = chain.then(() => new Promise(res => out.write(s, res)));
+        return chain;
+    };
+}
+
 async function main() {
-    const serve = process.argv.includes('--serve');
-    if (serve) {
+    if (process.argv.includes('--serve')) {
         const rl = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });
-        for await (const line of rl) {
-            if (!line.trim()) continue;
+        const writeLine = makeWriter(process.stdout);
+        /** 在途请求 id -> AbortController，供 ctrl:cancel 中止 */
+        const inflight = new Map();
+
+        // stdout 写入失败 = Rust 侧已放弃本进程（窗口关闭/服务重建），直接退出避免僵尸
+        process.stdout.on('error', () => process.exit(0));
+
+        rl.on('line', line => {
+            line = line.trim();
+            if (!line) return;
             let req;
             try {
                 req = JSON.parse(line);
-                const result = await handle(req);
-                process.stdout.write(JSON.stringify({ id: req.id, ok: true, result }) + '\n');
-            } catch (e) {
-                process.stdout.write(JSON.stringify({ id: req?.id ?? null, ok: false, error: String(e.message || e) }) + '\n');
+            } catch {
+                writeLine({ id: null, ok: false, error: '请求不是合法 JSON' });
+                return;
             }
-        }
+            if (req.ctrl === 'cancel') {
+                const ac = inflight.get(req.target);
+                if (ac) {
+                    inflight.delete(req.target);
+                    ac.abort();
+                    writeLine({ id: req.target, ok: false, error: '已取消' });
+                }
+                return;
+            }
+            if (req.name === 'ping') {
+                writeLine({ id: req.id ?? null, ok: true, result: 'pong' });
+                return;
+            }
+            const ac = new AbortController();
+            inflight.set(req.id, ac);
+            // 不 await：单个 bash 可跑 180s，串行会把所有工具调用堵成队列
+            handle(req, ac.signal)
+                .then(result => { if (inflight.delete(req.id)) writeLine({ id: req.id, ok: true, result }); })
+                .catch(e => { if (inflight.delete(req.id)) writeLine({ id: req.id, ok: false, error: String(e?.message || e) }); });
+        });
+
+        rl.on('close', () => {
+            for (const ac of inflight.values()) ac.abort();
+            inflight.clear();
+            process.exit(0);
+        });
         return;
     }
     // 单次模式

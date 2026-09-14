@@ -1,6 +1,6 @@
 //! SSE 流转发与协议分片解析
 
-use crate::state::{emit_chat, CANCELLED};
+use crate::state::{cancel_notifier, emit_chat, CANCELLED};
 use crate::types::Frag;
 use futures_util::StreamExt;
 use serde_json::{json, Value};
@@ -24,13 +24,28 @@ pub(super) async fn stream_sse(
     let mut last_out: Option<Instant> = None;
     let mut tokens: Option<u64> = None;
     let mut chunks = 0u64;
+    // 取消唤醒器：不能只在循环头查 CANCELLED，否则流停滞时要挂满读取超时才放手
+    let notifier = cancel_notifier(rid);
 
     loop {
         if CANCELLED.lock().unwrap().remove(rid) {
             emit_chat(app, rid, "aborted", Value::Null);
             break;
         }
-        let next = tokio::time::timeout(Duration::from_secs(180), stream.next()).await;
+        let next = tokio::select! {
+            biased;
+            _ = async {
+                match &notifier {
+                    Some(n) => n.notified().await,
+                    None => std::future::pending::<()>().await,
+                }
+            } => {
+                CANCELLED.lock().unwrap().remove(rid);
+                emit_chat(app, rid, "aborted", Value::Null);
+                break;
+            }
+            r = tokio::time::timeout(Duration::from_secs(180), stream.next()) => r,
+        };
         match next {
             Err(_) => {
                 emit_chat(app, rid, "error", json!("数据流读取超时（180 秒无输出）"));

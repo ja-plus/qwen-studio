@@ -3,14 +3,21 @@ import {
     modelState, persistModelState, getProvider, getSelectedProvider,
     prettifyModelId, QWEN_PROVIDER_ID,
 } from './models.js';
-import { startChat, abortChat, readFile, listDir, canUseTauri } from './bridge.js';
+import { startChat, abortChat, abortTools, readFile, readFileHead, listDir, canUseTauri, getSysInfo } from './bridge.js';
 import {
-    TOOLS, executeTool, formatToolArgs, needsConfirm, toolMeta,
+    toolsFor, executeTool, formatToolArgs, needsConfirm, toolMeta,
     isFileChange, simpleDiff, parseFrontmatter,
 } from './agent.js';
+import { buildApiMessages, estimateTokens, isContextOverflow, CONTEXT_TOKEN_BUDGET } from './context.js';
 
 const MAX_AGENT_STEPS = 24;
 const LS_KEY = 'qs.v2'; // { conversations, projects, activeId, model }
+// 网络瞬时错误的重试上限与退避（一次瞬时抖动不该报废整轮任务）
+const MAX_ATTEMPTS = 3;
+const RETRY_BACKOFF = [500, 1500];
+// 同类失败/重复调用的熔断阈值
+const REPEAT_CALL_LIMIT = 3;
+const REPEAT_FAILURE_LIMIT = 2;
 
 let uidCounter = 0;
 const uid = p => `${p}_${Date.now().toString(36)}_${uidCounter++}`;
@@ -48,6 +55,7 @@ export const store = reactive({
     sending: false,
     treeVersion: 0,        // 工具写文件后递增，驱动文件树刷新
     error: '',
+    persistError: '',      // 本地存储写入失败（不能再静默丢用户的对话）
     draft: '',             // 输入框草稿
     expandedProjects: {},  // workspace -> 是否展开（仅会话内状态）
     showProjectFiles: {},  // workspace -> 是否显示文件树
@@ -62,7 +70,11 @@ export const store = reactive({
     },
 });
 
-export function persist() {
+/**
+ * 立即写入 localStorage，含配额不足时的降级重试。
+ * 以前超配额就 `catch {}` 静默放弃，用户会无感丢对话。
+ */
+function writeNow() {
     // 瘦身持久化：reasoning/快照/diff预览不存、工具结果截断，避免撑爆 localStorage
     // （快照仅会话内有效，重启后不提供回滚）
     const slim = store.conversations.map(c => ({
@@ -76,14 +88,56 @@ export function persist() {
                 ? m.resultText.slice(0, 2000) + '…（已截断）' : m.resultText,
         }),
     }));
+    const payload = () => JSON.stringify({
+        conversations: slim,
+        projects: store.projects,
+        activeId: store.activeId,
+        model: modelState.selected.modelId,
+    });
     try {
-        localStorage.setItem(LS_KEY, JSON.stringify({
-            conversations: slim,
+        localStorage.setItem(LS_KEY, payload());
+        store.persistError = '';
+        return;
+    } catch { /* 配额不足：降级再试 */ }
+    try {
+        const lean = JSON.stringify({
+            conversations: slim.slice(-30).map(c => ({
+                ...c,
+                messages: c.messages.map(m => (m.type === 'notice' ? m : { ...m, resultText: '' })),
+            })),
             projects: store.projects,
             activeId: store.activeId,
             model: modelState.selected.modelId,
-        }));
-    } catch { /* 超出配额则放弃本次保存 */ }
+        });
+        localStorage.setItem(LS_KEY, lean);
+        store.persistError = '本地存储已满：仅保留了最近 30 个会话且不再保存工具执行结果。';
+    } catch {
+        store.persistError = '本地存储已满，本次修改未能保存。请删除部分旧对话后重试。';
+    }
+}
+
+let persistTimer = null;
+
+/** 防抖保存：每条消息的每个粒度都同步 stringify 全量数据是主线程大杀手 */
+export function persist() {
+    if (persistTimer) return;
+    persistTimer = setTimeout(() => {
+        persistTimer = null;
+        writeNow();
+    }, 400);
+}
+
+/** 关键节点（回合结束、切换/删除会话、退出前）强制落盘 */
+export function flushPersist() {
+    if (persistTimer) {
+        clearTimeout(persistTimer);
+        persistTimer = null;
+    }
+    writeNow();
+}
+
+if (typeof window !== 'undefined') {
+    window.addEventListener('beforeunload', flushPersist);
 }
 
 /** 同步工具栏选中项到指定会话（providerId 缺失时回退内置千问） */
@@ -138,7 +192,7 @@ export function switchConversation(id) {
     if (conv.model) syncSelectionFromConv(conv);
     if (conv.workspace) store.expandedProjects[conv.workspace] = true;
     store.error = '';
-    persist();
+    flushPersist();
 }
 
 export function deleteConversation(id) {
@@ -148,7 +202,7 @@ export function deleteConversation(id) {
         const conv = store.activeConv;
         if (conv?.model) syncSelectionFromConv(conv);
     }
-    persist();
+    flushPersist();
 }
 
 export function registerProject(path) {
@@ -168,7 +222,7 @@ export function removeProject(path) {
         const conv = store.activeConv;
         if (conv?.model) syncSelectionFromConv(conv);
     }
-    persist();
+    flushPersist();
 }
 
 /** 为当前对话关联/更换项目文件夹 */
@@ -219,14 +273,9 @@ export function switchModel(providerId, modelId) {
         conv.model = modelId;
         const label = `${prettifyModelId(modelId)}（${getProvider(providerId)?.name || providerId}）`;
         const n = conv.messages.filter(m => m.role).length;
-        conv.messages.push({
-            id: uid('n'),
-            type: 'notice',
-            content: n ? `已切换到 ${label}，上下文（${n} 条消息）已同步` : `已切换到 ${label}`,
-            ts: Date.now(),
-        });
+        pushNotice(conv, n ? `已切换到 ${label}，上下文（${n} 条消息）已同步` : `已切换到 ${label}`);
     }
-    persist();
+    flushPersist();
 }
 
 // ---------- 请求构造 ----------
@@ -236,10 +285,13 @@ export function switchModel(providerId, modelId) {
 // ---------- 项目上下文：AGENTS.md + .agents/rules + .agents/skills ----------
 
 /**
- * 加载项目级上下文（AGENTS.md 指令、.agents/rules/ 规则、.agents/skills/ 技能目录）。
+ * 加载项目级上下文（AGENTS.md 指令、.agents/rules 规则、.agents/skills 技能目录）。
  * 按工作区缓存，treeVersion 变化（AI 写过文件）后失效重载。
  */
 let projCtxCache = { ws: '', version: -1, data: null };
+
+// SKILL.md 只需 frontmatter：先读头部，未闭合再放宽（正文由 skill 工具按需加载）
+const SKILL_HEAD_BYTES = 4 * 1024;
 
 async function loadProjectContext(conv) {
     if (!conv.workspace || !canUseTauri) return null;
@@ -260,19 +312,27 @@ async function loadProjectContext(conv) {
         for (const e of entries.slice(0, 30)) {
             if (!e.isDir && !/\.md$/i.test(e.name)) continue;
             const rel = e.isDir ? `${e.path}/SKILL.md` : e.path;
-            const c = await readTextFile(conv.workspace, rel, 32 * 1024);
-            if (c == null) continue;
-            const fm = parseFrontmatter(c, e.isDir ? e.name : e.name.replace(/\.md$/i, ''));
-            data.skills.push({ name: fm.name, description: fm.description, content: c });
+            // 以前每个 SKILL.md 全文 32KB 读进内存只为了取 name/description，最多 30 个全白读
+            let head = await readTextFile(conv.workspace, rel, SKILL_HEAD_BYTES, SKILL_HEAD_BYTES);
+            if (head != null && head.startsWith('---') && !/^---[\s\S]*?\n---/.test(head)) {
+                head = await readTextFile(conv.workspace, rel, SKILL_HEAD_BYTES * 4, SKILL_HEAD_BYTES * 4) ?? head;
+            }
+            if (head == null) continue;
+            const fm = parseFrontmatter(head, e.isDir ? e.name : e.name.replace(/\.md$/i, ''));
+            data.skills.push({ name: fm.name, description: fm.description });
         }
     } catch { /* 无 skills 目录 */ }
     projCtxCache = { ws: conv.workspace, version: store.treeVersion, data };
     return data;
 }
 
-async function readTextFile(ws, rel, cap) {
+/**
+ * @param cap 写入上下文的字符上限
+ * @param maxBytes 只读文件前 N 字节（后端支持，避免大文件整读）
+ */
+async function readTextFile(ws, rel, cap, maxBytes = null) {
     try {
-        let t = await readFile(ws, rel);
+        let t = maxBytes ? await readFileHead(ws, rel, maxBytes) : await readFile(ws, rel);
         if (t.length > cap) t = t.slice(0, cap) + '\n…（已截断）';
         return t;
     } catch {
@@ -280,7 +340,8 @@ async function readTextFile(ws, rel, cap) {
     }
 }
 
-function systemPrompt(conv, ctx) {
+/** 系统提示：运行环境必须取自真实平台，写死 Windows 会让 Linux/macOS 上的模型生成错命令 */
+function systemPrompt(conv, ctx, sys = { platformLabel: 'Unknown', shell: 'sh', arch: '' }) {
     if (!conv.workspace || !store.agentMode) return '';
     const lines = [];
     lines.push(
@@ -319,7 +380,7 @@ function systemPrompt(conv, ctx) {
         '',
         '<env>',
         `  Working directory: ${conv.workspace}`,
-        `  Platform: Windows (cmd shell)`,
+        `  Platform: ${sys.platformLabel} (${sys.shell} shell)`,
         `  Today's date: ${new Date().toISOString().slice(0, 10)}`,
         `  Model: ${providerFor(conv)?.name || 'unknown'} · ${conv.model || modelState.selected.modelId}`,
         '</env>',
@@ -344,35 +405,14 @@ function systemPrompt(conv, ctx) {
     return lines.join('\n');
 }
 
-function apiMessages(conv, attMap) {
-    const out = [];
-    for (const m of conv.messages) {
-        if (m.type === 'notice') continue;
-        if (m.role === 'user') {
-            let content = m.content;
-            const att = attMap?.get(m.id);
-            if (att?.length) {
-                // @引用的文件内容内联注入（每次请求重新读取，保证是最新内容）
-                content += '\n\n<attached_files>\n'
-                    + att.map(a => `<file path="${a.path}">\n${a.content}\n</file>`).join('\n')
-                    + '\n</attached_files>';
-            }
-            out.push({ role: 'user', content });
-        } else if (m.role === 'assistant') {
-            const msg = { role: 'assistant', content: m.content || '' };
-            if (m.tool_calls?.length) {
-                msg.tool_calls = m.tool_calls.map(tc => ({
-                    id: tc.id,
-                    type: 'function',
-                    function: { name: tc.function.name, arguments: tc.function.arguments },
-                }));
-            }
-            out.push(msg);
-        } else if (m.role === 'tool') {
-            out.push({ role: 'tool', tool_call_id: m.tool_call_id, content: m.resultText ?? '' });
-        }
-    }
-    return out;
+/**
+ * 一个回合只准备一次：项目上下文、@引用文件与系统提示。
+ * 逐步重读会重复读盘、重复注入，最多 200KB 的 @引用内容以前会被重发 24 次。
+ */
+async function prepareContext(conv) {
+    const sysInfo = await getSysInfo();
+    const [ctx, attMap] = await Promise.all([loadProjectContext(conv), resolveAttachments(conv)]);
+    return { sysInfo, attMap, sys: systemPrompt(conv, ctx, sysInfo) };
 }
 
 function mergeToolCallDelta(acc, deltas) {
@@ -438,6 +478,8 @@ async function readAttachment(ws, rel) {
 // ---------- 发送与 Agent 循环 ----------
 
 let activeRid = null;
+// 本回合是否被用户按了停止：工具执行阶段流式请求早已结束，光靠 rid 停不下来
+let userAborted = false;
 
 export async function sendMessage(text) {
     text = (text || '').trim();
@@ -457,7 +499,9 @@ export async function sendMessage(text) {
 }
 
 export async function stopGenerating() {
-    if (activeRid) await abortChat(activeRid);
+    userAborted = true;
+    // 两条链路一起停：流式输出（rid）与正在跑的工具子进程（含 bash 进程树）
+    await Promise.all([abortChat(activeRid), abortTools().catch(() => {})]);
 }
 
 // ---------- 提示词美化（一次性请求，不写入对话历史） ----------
@@ -493,7 +537,12 @@ export async function beautifyPrompt(text, handlers) {
 
 async function runTurn(conv) {
     store.sending = true;
+    userAborted = false;
     try {
+        // 一个回合只准备一次上下文（以前每步重读文件、重发 @引用）
+        const bundle = await prepareContext(conv);
+        const callCounts = new Map();
+        const failCounts = new Map();
         for (let step = 0; step < MAX_AGENT_STEPS; step++) {
             const item = reactive({
                 id: uid('a'),
@@ -509,10 +558,10 @@ async function runTurn(conv) {
 
             let res;
             try {
-                res = await requestOnce(item, conv);
+                res = await requestWithRetry(item, conv, bundle);
             } catch (e) {
                 item.status = 'error';
-                item.content = `**请求失败**：${e.message || e}`;
+                item.errorText = `请求失败：${e.message || e}`;
                 break;
             }
 
@@ -521,7 +570,8 @@ async function runTurn(conv) {
                 : null;
             item.status = res.aborted ? 'aborted' : res.error ? 'error' : 'done';
             if (res.error) {
-                item.content += `${item.content ? '\n\n' : ''}**接口错误**：${res.error}`;
+                // 错误只写 errorText（给用户看）：写进 content 会被当成助手发过的话回传给模型
+                item.errorText = `接口错误：${res.error}`;
                 break;
             }
             if (res.aborted) {
@@ -534,6 +584,12 @@ async function runTurn(conv) {
             }
             if (toolCalls?.length && item.sentTools) {
                 item.tool_calls = toolCalls;
+                const repeat = noteRepeatCall(callCounts, toolCalls);
+                if (repeat) {
+                    skipToolCalls(toolCalls, conv, '（检测到重复空转，已熔断，未执行）');
+                    pushNotice(conv, `检测到重复的工具调用：${repeat}。已停止本轮，请补充信息或提示模型换个做法。`);
+                    break;
+                }
                 // 先按序建卡（展示顺序稳定），再并行执行：
                 // 系统提示词要求模型批量发起独立调用，这里兑现“并行”承诺
                 const toolItems = toolCalls.map(tc => {
@@ -542,7 +598,13 @@ async function runTurn(conv) {
                 });
                 await Promise.all(toolItems.map(ti => executeToolItem(ti, conv)));
                 if (conv.workspace) store.treeVersion++;
+                const spinning = noteRepeatFailure(failCounts, toolItems);
+                if (spinning) {
+                    pushNotice(conv, spinning);
+                    break;
+                }
                 persist();
+                if (userAborted) break;
                 continue; // 模型继续消费工具结果
             }
             break;
@@ -550,26 +612,92 @@ async function runTurn(conv) {
     } finally {
         store.sending = false;
         activeRid = null;
-        persist();
+        flushPersist();
     }
+}
+
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+// 可重试的瞬时错误特征：连不上、流中断、超时、限流、网关抹错
+const TRANSIENT_RE = /网络请求失败|数据流中断|数据流读取超时|429|50[0234]|ECONN|ETIMEDOUT|EAI_AGAIN|error sending request|reset|timed out|socket/i;
+
+/**
+ * 请求失败自动重试 1-2 次（退避 500ms / 1500ms）。
+ * 以前任何一次拖抖都直接 break，整轮任务报废。上下文超长那么现场缩预算重发一次。
+ */
+async function requestWithRetry(item, conv, bundle) {
+    let budget = CONTEXT_TOKEN_BUDGET;
+    for (let attempt = 1; ; attempt++) {
+        const res = await requestOnce(item, conv, bundle, budget);
+        if (!res.error || res.aborted || userAborted || attempt >= MAX_ATTEMPTS) return res;
+        const overflow = isContextOverflow(res.error);
+        if (!overflow && !TRANSIENT_RE.test(res.error)) return res;
+        // 重发前清掉已流入的半截输出，否则重试后正文会重复一遍
+        item.content = '';
+        item.reasoning = '';
+        item._tcAcc = {};
+        item.tps = 0;
+        if (overflow) budget = Math.max(6000, Math.round(budget * 0.6));
+        await sleep(RETRY_BACKOFF[attempt - 1] ?? 1500);
+        if (userAborted) return res;
+    }
+}
+
+function stableStringify(v) {
+    if (v === null || typeof v !== 'object') return JSON.stringify(v ?? null);
+    if (Array.isArray(v)) return `[${v.map(stableStringify).join(',')}]`;
+    return `{${Object.keys(v).sort().map(k => `${JSON.stringify(k)}:${stableStringify(v[k])}`).join(',')}}`;
+}
+
+function callFingerprint(tc) {
+    let args = {};
+    try {
+        args = JSON.parse(tc.function.arguments || '{}');
+    } catch {
+        args = { _raw: tc.function.arguments };
+    }
+    return `${tc.function.name}:${stableStringify(args)}`;
+}
+
+/** 同一工具以同样参数反复出现：计数达到阈值时返回熔断描述（模型在原地打转） */
+function noteRepeatCall(counts, toolCalls) {
+    for (const tc of toolCalls) {
+        const fp = callFingerprint(tc);
+        const n = (counts.get(fp) || 0) + 1;
+        counts.set(fp, n);
+        if (n >= REPEAT_CALL_LIMIT) return `${tc.function.name} 已以相同参数调用 ${n} 次`;
+    }
+    return null;
+}
+
+/** 同参数 + 同错误连续出现：比单纯重复调用更早发现“一直在失败却不换思路” */
+function noteRepeatFailure(counts, toolItems) {
+    for (const ti of toolItems) {
+        if (ti.status !== 'error') continue;
+        const fp = `${ti.name}:${stableStringify(ti.args || {})}:${String(ti.resultText).slice(0, 160)}`;
+        const n = (counts.get(fp) || 0) + 1;
+        counts.set(fp, n);
+        if (n >= REPEAT_FAILURE_LIMIT) {
+            return `工具 ${ti.name} 以相同参数连续失败 ${n} 次（${String(ti.resultText).slice(0, 80)}），已停止本轮空转。`;
+        }
+    }
+    return null;
+}
+
+/** 熔断时必须给已发出的 tool_calls 补上响应，否则历史里的配对关系会弄坏下一次请求 */
+function skipToolCalls(toolCalls, conv, text) {
+    for (const tc of toolCalls) {
+        if (!tc.id) tc.id = uid('call');
+        const ti = createToolItem(tc, conv);
+        ti.status = 'denied';
+        ti.resultText = text;
+    }
+}
+
+function pushNotice(conv, content) {
+    conv.messages.push({ id: uid('n'), type: 'notice', content, ts: Date.now() });
 }
 
 // ---------- 输出速率统计 ----------
-
-// 中日韩与全角字符：千问词表下约 1.4 字 = 1 token；其余文本约 4 字符 = 1 token
-const CJK_RE = /[\u2e80-\u303f\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uac00-\ud7af\uf900-\ufaff\uff00-\uffef]/;
-
-/** 接口未回 usage 时的兜底：按字符量粗估 token 数 */
-function estimateTokens(text) {
-    if (!text) return 0;
-    let cjk = 0;
-    let rest = 0;
-    for (const ch of text) {
-        if (CJK_RE.test(ch)) cjk++;
-        else rest++;
-    }
-    return Math.round(cjk * 0.7 + rest / 4);
-}
 
 /** 本轮输出的全部文本（正文 + 思考 + 工具调用参数），它们都占用解码量 */
 function outputText(item) {
@@ -600,12 +728,21 @@ function settleRate(item, timing, jsFirst, jsLast) {
     item.tps = tokenRate(tokens, windowMs);
 }
 
-async function requestOnce(item, conv) {
+/**
+ * 发一次请求。
+ * @param bundle 回合级上下文（系统提示 / @引用 / 平台信息），由 runTurn 准备一次后逐步复用
+ * @param budget 历史消息的 token 预算（撞上下文超限时会被压缩后重发）
+ */
+async function requestOnce(item, conv, bundle, budget) {
     const messages = [];
-    const [ctx, attMap] = await Promise.all([loadProjectContext(conv), resolveAttachments(conv)]);
-    const sys = systemPrompt(conv, ctx);
+    const built = buildApiMessages(conv, bundle.attMap, budget);
+    let sys = bundle.sys;
+    if (built.droppedUnits) {
+        // 不静默丢历史：告诉模型被省略了多少，它才知道可能要重新查
+        sys += `\n\n<history>\n  为控制上下文长度，已省略较早的 ${built.droppedUnits} 组历史消息。若所需信息不在下文中，请重新用工具查询。\n</history>`;
+    }
     if (sys) messages.push({ role: 'system', content: sys });
-    messages.push(...apiMessages(conv, attMap));
+    messages.push(...built.messages);
 
     const provider = providerFor(conv);
     const payload = {
@@ -617,7 +754,7 @@ async function requestOnce(item, conv) {
         stream: true,
     };
     const useTools = store.agentMode && !!conv.workspace;
-    if (useTools) payload.tools = TOOLS;
+    if (useTools) payload.tools = toolsFor(bundle.sysInfo);
     item.sentTools = useTools;
 
     // 实时速率：每个输出分片刷新一次（节流 250ms）。流式过程中拿不到 usage，

@@ -8,9 +8,17 @@ import net from 'node:net';
 
 const root = join(fileURLToPath(new URL('.', import.meta.url)), '..');
 const DEV_PORT = Number(process.env.QS_DEV_PORT || 4000); // 与 tauri.conf.json 的 devUrl 同源
-const XWIN = 'C:\\Users\\ja\\xwin';
-const SDK_TOOLS = 'C:\\Users\\ja\\sdk-tools';
-const VSWHERE = 'C:\\Program Files (x86)\\Microsoft Visual Studio\\Installer\\vswhere.exe';
+
+// 工具链位置：环境变量优先，现值为默认。写死某台机器的目录会让别人拉到仓库直接构建不起来
+const XWIN = process.env.QS_XWIN_DIR || 'C:\\Users\\ja\\xwin';
+const SDK_TOOLS = process.env.QS_SDK_TOOLS_DIR || 'C:\\Users\\ja\\sdk-tools';
+const VSWHERE = process.env.QS_VSWHERE
+    || 'C:\\Program Files (x86)\\Microsoft Visual Studio\\Installer\\vswhere.exe';
+// vswhere 不可用时逐个探测的 MSVC 根目录（多个用 path.delimiter 分隔）
+const MSVC_FALLBACK = (process.env.QS_MSVC_FALLBACK || '')
+    .split(delimiter).map(s => s.trim()).filter(Boolean);
+const MSVC_DEFAULT = 'C:\\Program Files\\Microsoft Visual Studio\\2022\\Community\\VC\\Tools\\MSVC\\14.44.35207';
+const checked = []; // 找不到工具链时把看过哪些路径打出来，省得用户猜
 
 // 用 vswhere 动态定位 MSVC 工具链目录，失败则退回已知路径
 function findMsvcDir() {
@@ -23,12 +31,15 @@ function findMsvcDir() {
                 const msvcRoot = join(vsPath, 'VC', 'Tools', 'MSVC');
                 if (existsSync(msvcRoot)) {
                     candidates.push(...readdirSync(msvcRoot).sort().reverse().map(d => join(msvcRoot, d)));
-                }
+                } else checked.push(msvcRoot);
             }
         } catch { /* ignore */ }
     }
-    candidates.push('C:\\Program Files\\Microsoft Visual Studio\\2022\\Community\\VC\\Tools\\MSVC\\14.44.35207');
-    return candidates.find(d => existsSync(join(d, 'bin', 'Hostx64', 'x64', 'link.exe')));
+    for (const d of [...candidates, ...MSVC_FALLBACK, MSVC_DEFAULT]) {
+        if (existsSync(join(d, 'bin', 'Hostx64', 'x64', 'link.exe'))) return d;
+        checked.push(d);
+    }
+    return null;
 }
 
 const env = { ...process.env };
@@ -41,23 +52,25 @@ if (process.platform === 'win32') {
         if (!env.INCLUDE) {
             env.INCLUDE = [
                 join(msvc, 'include'),
-                `${XWIN}\\sdk\\include\\ucrt`,
-                `${XWIN}\\sdk\\include\\um`,
-                `${XWIN}\\sdk\\include\\shared`,
+                join(XWIN, 'sdk', 'include', 'ucrt'),
+                join(XWIN, 'sdk', 'include', 'um'),
+                join(XWIN, 'sdk', 'include', 'shared'),
             ].join(';');
         }
         if (!env.LIB) {
             env.LIB = [
                 join(msvc, 'lib', 'x64'),
-                `${XWIN}\\sdk\\lib\\ucrt\\x86_64`,
-                `${XWIN}\\sdk\\lib\\um\\x86_64`,
+                join(XWIN, 'sdk', 'lib', 'ucrt', 'x86_64'),
+                join(XWIN, 'sdk', 'lib', 'um', 'x86_64'),
             ].join(';');
         }
-        if (existsSync(SDK_TOOLS)) env.RC = `${SDK_TOOLS}\\rc.exe`;
+        if (existsSync(SDK_TOOLS)) env.RC = join(SDK_TOOLS, 'rc.exe');
         // MSVC 与 rc.exe 前置到 PATH（抢占 Git Bash 的 GNU link）
         env.PATH = [join(msvc, 'bin', 'Hostx64', 'x64'), existsSync(SDK_TOOLS) ? SDK_TOOLS : null, env.PATH].filter(Boolean).join(delimiter);
     } else if (!env.INCLUDE) {
         console.warn('[tauri.mjs] 未找到 MSVC 工具链，且环境无 INCLUDE —— 若编译报链接错误，请检查 VS C++ 生成工具');
+        console.warn(`[tauri.mjs] 已检查过：\n${[...new Set(checked)].map(p => `  - ${p}`).join('\n')}`);
+        console.warn('[tauri.mjs] 可用环境变量改指向你自己的安装：QS_XWIN_DIR / QS_SDK_TOOLS_DIR / QS_VSWHERE / QS_MSVC_FALLBACK（多个路径以 ; 分隔）');
     }
 }
 

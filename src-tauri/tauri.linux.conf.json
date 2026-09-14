@@ -1,5 +1,10 @@
 {
     "$schema": "https://schema.tauri.app/config/2",
+    "app": {
+        "security": {
+            "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; font-src 'self' data:; connect-src 'self' ipc: http://ipc.localhost ws://localhost:4000 http://localhost:4000 https:; worker-src 'self' blob:; object-src 'none'; base-uri 'self'; frame-ancestors 'none'"
+        }
+    },
     "bundle": {
         "targets": ["deb", "rpm"]
     }

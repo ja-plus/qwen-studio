@@ -148,6 +148,28 @@ export async function abortChat(rid) {
     }
 }
 
+/**
+ * 中止全部在途工具调用（包括工具内部启动的 shell 进程树）。
+ * 流式输出早已结束、正在跑工具时，abortChat 那个 rid 是无意义的——必须单独喊工具侧。
+ */
+export async function abortTools() {
+    if (canUseTauri) await invoke('tool_cancel');
+}
+
+// ---------- 运行平台（系统提示与工具描述不能用写死的 Windows） ----------
+
+let sysInfoPromise = null;
+
+/** 缓存一次性的平台信息：同一会话里不会变 */
+export function getSysInfo() {
+    if (!sysInfoPromise) {
+        sysInfoPromise = canUseTauri
+            ? invoke('sys_info').catch(() => ({ os: 'unknown', arch: '', shell: 'sh', platformLabel: 'Unknown' }))
+            : Promise.resolve({ os: 'browser', arch: '', shell: 'sh', platformLabel: 'Browser' });
+    }
+    return sysInfoPromise;
+}
+
 // ---------- 工作区文件/命令（仅 Tauri 环境可用） ----------
 
 export async function tauriInvoke(cmd, args) {
@@ -166,8 +188,13 @@ export async function listDir(workspace, path = '', all = false) {
     return tauriInvoke('list_dir', { workspace, path: path || null, all });
 }
 
-export async function readFile(workspace, path) {
-    return tauriInvoke('read_file', { workspace, path });
+export async function readFile(workspace, path, maxBytes = null) {
+    return tauriInvoke('read_file', { workspace, path, maxBytes });
+}
+
+/** 只读文件头部若干字节：取 frontmatter 之类元信息用，不必把全文读进内存 */
+export async function readFileHead(workspace, path, bytes = 8192) {
+    return tauriInvoke('read_file', { workspace, path, maxBytes: bytes });
 }
 
 export async function writeFile(workspace, path, content) {

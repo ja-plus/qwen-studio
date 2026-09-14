@@ -3,7 +3,9 @@
 mod protocols;
 mod sse;
 
-use crate::state::{fail_chat, truncate_str, CANCELLED, DEFAULT_BASE_URL, REQ_SEQ};
+use crate::state::{
+    fail_chat, register_cancel, truncate_str, unregister_cancel, CANCELLED, DEFAULT_BASE_URL, REQ_SEQ,
+};
 use crate::types::ChatReq;
 use protocols::{anthropic_body, chat_body, responses_body};
 use serde_json::Value;
@@ -115,15 +117,22 @@ fn resolve_url(base: &str, protocol: &str) -> String {
 #[tauri::command]
 pub(crate) async fn chat_stream(app: AppHandle, req: ChatReq) -> Result<String, String> {
     let rid = format!("r{}", REQ_SEQ.fetch_add(1, Ordering::Relaxed));
+    // 先登记唤醒器再 spawn，避免取消信号早于 stream_sse 启动而丢失
+    register_cancel(&rid);
     let app2 = app.clone();
     let rid2 = rid.clone();
     tauri::async_runtime::spawn(async move {
-        run_chat(app2, rid2, req).await;
+        run_chat(app2, rid2.clone(), req).await;
+        unregister_cancel(&rid2);
     });
     Ok(rid)
 }
 
 #[tauri::command]
 pub(crate) fn chat_cancel(rid: String) {
-    CANCELLED.lock().unwrap().insert(rid);
+    CANCELLED.lock().unwrap().insert(rid.clone());
+    // 立即叫醒 stream_sse：否则要等下一个分片到达才生效（流停滞时最长 180 秒）
+    if let Some(n) = crate::state::cancel_notifier(&rid) {
+        n.notify_waiters();
+    }
 }
